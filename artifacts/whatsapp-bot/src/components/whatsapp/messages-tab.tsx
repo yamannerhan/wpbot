@@ -153,7 +153,7 @@ export function MessagesTab() {
           <div className="flex items-center gap-2 mb-2">
             <Users className="w-4 h-4 text-muted-foreground" />
             <p className="text-xs text-muted-foreground uppercase font-semibold tracking-wider">
-              Dinlenen Grup
+              Dinlenen Kaynak
             </p>
           </div>
           <p className="text-3xl font-bold font-mono">
@@ -271,9 +271,9 @@ export function MessagesTab() {
             <MessageSquare className="w-16 h-16 opacity-10 mb-6" />
             <p className="text-lg">Havuzda henüz mesaj bulunmuyor.</p>
             <p className="text-sm mt-2 opacity-70 max-w-md text-center">
-              Özel güvenlik iş ilanları toplanır. Aynı metin birebir tekrar
-              edilmez; numara/isim/maaş farkı ayrı ilan sayılır. Grup seçip
-              &quot;Yeniden Tara (15 gün)&quot; ile geçmişi çekin.
+              Özel güvenlik ilanları toplanır (filtre gevşek). Sadece birebir
+              aynı metin atlanır. Grup + kanal seçip &quot;Yeniden Tara (15
+              gün)&quot; ile geçmişi çekin.
             </p>
             {debouncedSearch && (
               <p className="text-sm mt-2 opacity-70">
@@ -285,6 +285,7 @@ export function MessagesTab() {
           <div className="flex-1 overflow-y-auto p-3 md:p-5 space-y-3 custom-scrollbar">
             {messagesPage.messages.map((msg: WhatsAppMessage) => {
               const waLink = buildWhatsAppGroupLink(msg.groupId, msg.messageId);
+              const isChannel = String(msg.groupId || '').endsWith('@newsletter');
               return (
                 <div
                   key={msg.id}
@@ -292,6 +293,14 @@ export function MessagesTab() {
                 >
                   <div className="flex flex-col sm:flex-row sm:justify-between sm:items-start gap-2 sm:gap-4">
                     <div className="flex items-center gap-3 overflow-hidden min-w-0">
+                      {isChannel && (
+                        <Badge
+                          variant="outline"
+                          className="bg-blue-500/10 text-blue-600 border-blue-500/20 shrink-0 font-medium px-2 py-0.5 rounded-md"
+                        >
+                          Kanal
+                        </Badge>
+                      )}
                       <Badge
                         variant="outline"
                         className="bg-primary/10 text-primary border-primary/20 shrink-0 font-medium px-2 py-0.5 rounded-md"
@@ -325,7 +334,7 @@ export function MessagesTab() {
                       target="_blank"
                       rel="noopener noreferrer"
                       className="inline-flex items-center gap-1.5 text-xs font-medium text-primary hover:underline"
-                      title="WhatsApp grubunu / mesajı aç"
+                      title={isChannel ? "WhatsApp kanalını aç" : "WhatsApp grubunu / mesajı aç"}
                     >
                       <ExternalLink className="w-3.5 h-3.5" />
                       WhatsApp&apos;ta aç

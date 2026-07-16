@@ -68,7 +68,7 @@ export function GroupsTab({ status }: { status?: WhatsAppStatus }) {
     saveMutation.mutate({ data: { groupIds: Array.from(selectedIds) } }, {
       onSuccess: () => {
         queryClient.invalidateQueries({ queryKey: getGetSelectedGroupsQueryKey() });
-        toast.success("Grup seçimleri kaydedildi");
+        toast.success("Grup ve kanal seçimleri kaydedildi");
       },
       onError: () => toast.error("Kaydetme işlemi başarısız oldu")
     });
@@ -81,7 +81,7 @@ export function GroupsTab({ status }: { status?: WhatsAppStatus }) {
           <AlertCircle className="w-10 h-10 opacity-50" />
         </div>
         <p className="text-xl font-medium">Önce WhatsApp'a bağlanın</p>
-        <p className="text-sm text-center max-w-sm">Grupları görüntülemek ve seçim yapmak için aktif bir WhatsApp bağlantısı gereklidir.</p>
+        <p className="text-sm text-center max-w-sm">Grup ve kanalları görüntülemek için aktif bir WhatsApp bağlantısı gereklidir.</p>
       </div>
     );
   }
@@ -90,7 +90,7 @@ export function GroupsTab({ status }: { status?: WhatsAppStatus }) {
     return (
       <div className="flex flex-col items-center justify-center h-full min-h-[50vh] space-y-4">
         <Loader2 className="w-10 h-10 animate-spin text-primary" />
-        <p className="text-muted-foreground animate-pulse">Gruplar yükleniyor...</p>
+        <p className="text-muted-foreground animate-pulse">Gruplar ve kanallar yükleniyor...</p>
       </div>
     );
   }
@@ -108,7 +108,7 @@ export function GroupsTab({ status }: { status?: WhatsAppStatus }) {
         <div className="relative w-full md:w-96">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
           <Input 
-            placeholder="Grup adı ara..." 
+            placeholder="Grup veya kanal ara..." 
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
             className="pl-9 bg-background border-border/50 focus-visible:ring-primary/50"
@@ -186,7 +186,7 @@ export function GroupsTab({ status }: { status?: WhatsAppStatus }) {
             </div>
           )}
 
-          {filteredChannels.length > 0 && (
+          {filteredChannels.length > 0 ? (
             <div>
               <div className="flex items-center gap-2 mb-3 px-1">
                 <Radio className="w-4 h-4 text-primary" />
@@ -215,6 +215,11 @@ export function GroupsTab({ status }: { status?: WhatsAppStatus }) {
                           className={`mt-1 data-[state=checked]:bg-primary data-[state=checked]:text-primary-foreground ${isSelected ? 'border-primary' : 'border-muted-foreground/40'}`}
                         />
                         <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 mb-1">
+                            <span className="text-[10px] uppercase tracking-wide font-semibold text-primary bg-primary/10 px-1.5 py-0.5 rounded">
+                              Kanal
+                            </span>
+                          </div>
                           <h3 className="font-semibold text-sm leading-tight line-clamp-2 text-foreground/90 group-hover:text-foreground">
                             {channel.name}
                           </h3>
@@ -228,6 +233,12 @@ export function GroupsTab({ status }: { status?: WhatsAppStatus }) {
                   );
                 })}
               </div>
+            </div>
+          ) : (
+            <div className="rounded-xl border border-dashed border-border bg-card/30 px-4 py-6 text-center text-sm text-muted-foreground">
+              Abone olunan WhatsApp kanalı bulunamadı. Telefonda kanala abone
+              olduktan sonra sayfayı yenileyin; &quot;Tümünü Seç&quot; grup + kanal
+              seçer.
             </div>
           )}
         </div>

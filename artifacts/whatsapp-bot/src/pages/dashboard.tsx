@@ -33,7 +33,7 @@ export default function Dashboard() {
               disabled={!status?.connected}
               className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent px-2 sm:px-4 py-3 data-[state=active]:text-primary transition-all whitespace-nowrap disabled:opacity-30 disabled:cursor-not-allowed"
             >
-              Gruplar
+              Gruplar & Kanallar
             </TabsTrigger>
             <TabsTrigger 
               value="messages" 

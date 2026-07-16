@@ -1,6 +1,6 @@
 /**
- * Detect private-security job listings (özel güvenlik iş ilanı).
- * Normal chat is rejected. Duplicate skip is handled elsewhere: exact full text only.
+ * Loose detector for özel güvenlik job listings.
+ * Prefer catching ads over missing them. Exact-text duplicates handled elsewhere.
  */
 
 function foldTr(text: string): string {
@@ -22,26 +22,10 @@ function foldTr(text: string): string {
 
 function hasPhoneNumber(text: string): boolean {
   const digits = text.replace(/\D/g, "");
-  if (/0?5\d{9}/.test(digits)) return true;
+  if (digits.length >= 10 && /0?5\d{9}/.test(digits)) return true;
   if (/90?5\d{9}/.test(digits)) return true;
   return /(?:\+?90|0)?\s*5\d{2}[\s.\-]?\d{3}[\s.\-]?\d{2}[\s.\-]?\d{2}/.test(
     text,
-  );
-}
-
-function hasSalarySignal(n: string): boolean {
-  return (
-    /\bmaas\b/.test(n) ||
-    /\bhakedis\b/.test(n) ||
-    /\bimkanlar\b/.test(n) ||
-    /\ducret\b/.test(n) ||
-    /\d[\d.\s]{2,}\s*tl\b/.test(n) ||
-    (/\btl\b/.test(n) && /\d{4,}/.test(n)) ||
-    /\byemek\b/.test(n) ||
-    /\bsetkart\b/.test(n) ||
-    /\bnakit\b/.test(n) ||
-    /\byol\s*parasi\b/.test(n) ||
-    /\bagirlamak\b/.test(n)
   );
 }
 
@@ -50,13 +34,14 @@ function hasSecurityTerm(n: string): boolean {
     /\bguvenlik\b/.test(n) ||
     /ozel\s*guv/.test(n) ||
     /\bogu\b/.test(n) ||
-    /\bog\b/.test(n)
+    /\bog\s*kimlik/.test(n) ||
+    /\bgorevlis/.test(n)
   );
 }
 
-function hasHiringOrListingShape(n: string): boolean {
+function hasJobSignal(n: string): boolean {
   return (
-    /\balim[iı]?\b/.test(n) ||
+    /\balim/.test(n) ||
     /\baliniyor\b/.test(n) ||
     /\baraniyor\b/.test(n) ||
     /\bariyoruz\b/.test(n) ||
@@ -64,75 +49,67 @@ function hasHiringOrListingShape(n: string): boolean {
     /\bbasvuru\b/.test(n) ||
     /\birtibat\b/.test(n) ||
     /\biletisim\b/.test(n) ||
-    /\bis\s*ilani\b/.test(n) ||
+    /\bis\s*ilan/.test(n) ||
     /\bise\s*alim\b/.test(n) ||
-    /\bcalisma\s*sekli\b/.test(n) ||
-    /\bprojesine\b/.test(n) ||
-    /\bproje\b/.test(n) ||
-    /\bsite\b/.test(n) ||
+    /\bmaas\b/.test(n) ||
+    /\bhakedis\b/.test(n) ||
+    /\ducret\b/.test(n) ||
+    /\bimkanlar\b/.test(n) ||
+    /\btl\b/.test(n) ||
     /\bvardiya\b/.test(n) ||
     /\bgunduz\b/.test(n) ||
     /\bgece\b/.test(n) ||
+    /\bproje\b/.test(n) ||
+    /\bsite\b/.test(n) ||
+    /\bkadro\b/.test(n) ||
     /\bkimlikli\b/.test(n) ||
-    /\byas\s*arasi\b/.test(n) ||
+    /\byas\b/.test(n) ||
     /\beleman\b/.test(n) ||
     /\bpersonel\b/.test(n) ||
-    /\bgorevlis/.test(n) ||
-    /\bkadro\b/.test(n) ||
     /\bcv\b/.test(n) ||
-    /\bekran\s*goruntusu\b/.test(n) ||
     /\bwhatsapp\b/.test(n) ||
     /\bwatsapp\b/.test(n) ||
-    /\bwp\b/.test(n)
+    /\bwp\b/.test(n) ||
+    /\byemek\b/.test(n) ||
+    /\bnakit\b/.test(n) ||
+    /\bsetkart\b/.test(n)
   );
 }
 
 function looksLikePlainChat(n: string, len: number): boolean {
-  if (len > 140) return false;
-  return /^(selam|slm|merhaba|nbr|naber|iyi\s*gunler|gunaydin|iyi\s*aksamlar|tesekkur|sagol|ok|tamam|eyw|evet|hayir)\b/.test(
+  if (len > 100) return false;
+  return /^(selam|slm|merhaba|nbr|naber|iyi\s*gunler|gunaydin|iyi\s*aksamlar|tesekkur|sagol|ok|tamam|eyw|evet|hayir|as|sa)\b/.test(
     n,
   );
 }
 
-function looksLikeAdBody(text: string, n: string): boolean {
-  const lines = text.split(/\n/).filter((l) => l.trim().length > 0);
-  if (lines.length >= 3 && text.length >= 60) return true;
-  if (text.length >= 90 && /[:：•\-]/.test(text)) return true;
-  if (text.length >= 120 && /\bguvenlik\b/.test(n)) return true;
-  return false;
-}
-
 /**
- * True for özel güvenlik job ads. Phone/name/salary may repeat across ads —
- * that alone must NOT reject. Only exact full-text duplicate is handled outside.
+ * Accept generously. Same phone/name/salary across ads is OK —
+ * only exact full text is deduped outside.
  */
 export function isPrivateSecurityJobListing(raw: string): boolean {
   const text = raw?.trim() ?? "";
-  if (text.length < 25) return false;
+  if (text.length < 18) return false;
 
   const n = foldTr(text);
-
   if (looksLikePlainChat(n, text.length)) return false;
-  if (!hasSecurityTerm(n)) return false;
 
-  // Classic: "özel güvenlik ... alım"
-  if (
-    /ozel\s*guvenlik.{0,60}alim/.test(n) ||
-    /guvenlik\s*gorevlis.{0,40}alim/.test(n) ||
-    /guvenlik.{0,40}araniyor/.test(n)
-  ) {
-    return true;
+  const security = hasSecurityTerm(n);
+  const job = hasJobSignal(n);
+  const phone = hasPhoneNumber(text);
+  const lines = text.split(/\n/).filter((l) => l.trim()).length;
+  const multiline = lines >= 2;
+
+  // Güvenlik / OG geçiyorsa: neredeyse her ilan metnini al
+  if (security) {
+    if (job || phone || multiline || text.length >= 35) return true;
+    return /guvenlik|ogu|ozel\s*guv|gorevlis/.test(n);
   }
 
-  const hiring = hasHiringOrListingShape(n);
-  const salary = hasSalarySignal(n);
-  const phone = hasPhoneNumber(text);
-
-  // Security + any listing signal
-  if (hiring || salary || phone) return true;
-
-  // Longer structured posts that mention güvenlik (phone parse may fail)
-  if (looksLikeAdBody(text, n)) return true;
+  // Kanallarda bazen "güvenlik" yazılmaz — telefon + iş sinyali yeter
+  if (phone && job) return true;
+  if (phone && multiline && text.length >= 40) return true;
+  if (job && multiline && text.length >= 55) return true;
 
   return false;
 }

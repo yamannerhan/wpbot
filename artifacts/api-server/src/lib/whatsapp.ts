@@ -78,6 +78,8 @@ class WhatsAppService {
   /** Oldest WA message key per chat — drives 15-day pagination cursor. */
   private oldestMsgKeyByJid = new Map<string, CachedMsgKey>();
   private groupNameCache = new Map<string, string>();
+  /** Channels discovered from WA sync / newsletter APIs (survive list refresh). */
+  private knownChannels = new Map<string, GroupInfo>();
   private connecting = false;
   private pendingPhone: string | undefined;
   private pairingRequested = false;
@@ -113,6 +115,8 @@ class WhatsAppService {
         sock.ev.removeAllListeners("creds.update");
         sock.ev.removeAllListeners("messages.upsert");
         sock.ev.removeAllListeners("messaging-history.set");
+        sock.ev.removeAllListeners("chats.upsert");
+        sock.ev.removeAllListeners("chats.set");
         sock.end(undefined);
       } catch {
         /* ignore */
@@ -316,6 +320,7 @@ class WhatsAppService {
 
       this.sock.ev.on("messages.upsert", async ({ messages, type }) => {
         this.cacheMessageKeys(messages);
+        this.rememberChatsFromMessages(messages);
         if (type === "notify" || type === "append" || type === "prepend") {
           await this.processMessages(messages, type !== "notify");
           if (type === "append" || type === "prepend") {
@@ -326,18 +331,33 @@ class WhatsAppService {
 
       this.sock.ev.on(
         "messaging-history.set",
-        async ({ messages, syncType, isLatest }) => {
+        async ({ messages, chats, syncType, isLatest }) => {
           logger.info(
-            { msgCount: messages?.length ?? 0, syncType, isLatest },
+            {
+              msgCount: messages?.length ?? 0,
+              chatCount: chats?.length ?? 0,
+              syncType,
+              isLatest,
+            },
             "messaging-history.set received",
           );
           this.cacheMessageKeys(messages ?? []);
+          this.rememberChatsFromMessages(messages ?? []);
+          this.rememberChatsFromChatList(chats ?? []);
           if (messages && messages.length > 0) {
             await this.processMessages(messages, true);
           }
           this.notifyHistoryBatch();
         },
       );
+
+      this.sock.ev.on("chats.upsert", (chats) => {
+        this.rememberChatsFromChatList(chats ?? []);
+      });
+
+      this.sock.ev.on("chats.set", ({ chats }) => {
+        this.rememberChatsFromChatList(chats ?? []);
+      });
     } catch (err) {
       this.connecting = false;
       logger.error({ err }, "Failed to connect WhatsApp");
@@ -415,13 +435,13 @@ class WhatsAppService {
       throw new Error("Not connected to WhatsApp");
     }
 
-    const results: GroupInfo[] = [];
+    const byId = new Map<string, GroupInfo>();
 
     try {
       const groups = await this.sock.groupFetchAllParticipating();
       for (const [id, meta] of Object.entries(groups)) {
         this.groupNameCache.set(id, meta.subject);
-        results.push({
+        byId.set(id, {
           id,
           name: meta.subject,
           participantCount: meta.participants?.length ?? 0,
@@ -432,27 +452,133 @@ class WhatsAppService {
       logger.error({ err }, "Failed to fetch groups");
     }
 
-    try {
-      const newsletters = await (this.sock as any).newsletterFetchSubscribed();
-      if (Array.isArray(newsletters)) {
-        for (const nl of newsletters) {
-          results.push({
-            id: nl.id,
-            name: nl.name ?? nl.id,
-            participantCount: nl.subscriberCount ?? 0,
-            type: "channel",
-          });
-        }
-      }
-    } catch (err) {
-      logger.debug({ err }, "Could not fetch newsletters");
+    // Subscribed WhatsApp Channels (newsletters)
+    await this.refreshSubscribedChannels();
+    for (const [id, ch] of this.knownChannels) {
+      if (!byId.has(id)) byId.set(id, ch);
     }
 
+    const results = Array.from(byId.values());
     if (results.length === 0) {
       throw new Error("Failed to fetch any groups or channels");
     }
 
-    return results.sort((a, b) => a.name.localeCompare(b.name, "tr"));
+    logger.info(
+      {
+        groups: results.filter((r) => r.type === "group").length,
+        channels: results.filter((r) => r.type === "channel").length,
+      },
+      "Listed groups and channels",
+    );
+
+    return results.sort((a, b) => {
+      if (a.type !== b.type) return a.type === "group" ? -1 : 1;
+      return a.name.localeCompare(b.name, "tr");
+    });
+  }
+
+  private async refreshSubscribedChannels(): Promise<void> {
+    if (!this.sock) return;
+    const sock = this.sock as any;
+
+    const tryParseList = (raw: unknown): void => {
+      const list = Array.isArray(raw)
+        ? raw
+        : raw && typeof raw === "object"
+          ? Array.isArray((raw as { newsletters?: unknown }).newsletters)
+            ? (raw as { newsletters: unknown[] }).newsletters
+            : Array.isArray((raw as { data?: unknown }).data)
+              ? (raw as { data: unknown[] }).data
+              : Object.values(raw as Record<string, unknown>)
+          : [];
+
+      for (const item of list) {
+        if (!item || typeof item !== "object") continue;
+        const nl = item as Record<string, unknown>;
+        const id = String(
+          nl.id ?? nl.jid ?? nl.newsletterJid ?? nl.newsletter_id ?? "",
+        );
+        if (!id.includes("@newsletter")) continue;
+        const name = String(
+          nl.name ??
+            nl.subject ??
+            nl.title ??
+            nl.notify ??
+            this.groupNameCache.get(id) ??
+            id,
+        );
+        const participantCount = Number(
+          nl.subscribersCount ??
+            nl.subscriberCount ??
+            nl.subscribers_count ??
+            nl.subscribers ??
+            0,
+        );
+        this.registerChannel(id, name, participantCount);
+      }
+    };
+
+    for (const fnName of [
+      "newsletterFetchSubscribed",
+      "newsletterFetchAllSubscribed",
+      "fetchSubscribedNewsletters",
+    ]) {
+      try {
+        if (typeof sock[fnName] !== "function") continue;
+        const raw = await sock[fnName]();
+        tryParseList(raw);
+      } catch (err) {
+        logger.debug({ err, fnName }, "Channel list API failed");
+      }
+    }
+  }
+
+  private registerChannel(
+    id: string,
+    name?: string,
+    participantCount = 0,
+  ): void {
+    if (!id?.endsWith("@newsletter")) return;
+    const display =
+      (name && name !== id ? name : null) ||
+      this.groupNameCache.get(id) ||
+      id;
+    this.groupNameCache.set(id, display);
+    const prev = this.knownChannels.get(id);
+    this.knownChannels.set(id, {
+      id,
+      name: display,
+      participantCount: participantCount || prev?.participantCount || 0,
+      type: "channel",
+    });
+  }
+
+  private rememberChatsFromChatList(chats: unknown[]): void {
+    for (const chat of chats ?? []) {
+      if (!chat || typeof chat !== "object") continue;
+      const c = chat as Record<string, unknown>;
+      const id = String(c.id ?? "");
+      if (!id.endsWith("@newsletter")) continue;
+      const name = String(
+        c.name ?? c.subject ?? c.verifiedName ?? c.notify ?? id,
+      );
+      this.registerChannel(id, name);
+    }
+  }
+
+  private rememberChatsFromMessages(messages: proto.IWebMessageInfo[]): void {
+    for (const msg of messages ?? []) {
+      const jid = msg.key?.remoteJid;
+      const alt = (msg.key as { remoteJidAlt?: string } | null)?.remoteJidAlt;
+      for (const id of [jid, alt]) {
+        if (id?.endsWith("@newsletter")) {
+          const push =
+            (msg as { pushName?: string }).pushName ||
+            this.groupNameCache.get(id);
+          this.registerChannel(id, push);
+        }
+      }
+    }
   }
 
   async autoConnect(): Promise<void> {
@@ -690,7 +816,7 @@ class WhatsAppService {
 
     return {
       triggered,
-      storedHint: `${selectedGroupIds.length} grup tarandı (max 15 gün) — ${added} yeni ilan eklendi. Dinleme açık, yeni gelenler otomatik alınır.`,
+      storedHint: `${selectedGroupIds.length} kaynak tarandı (grup+kanal, max 15 gün) — ${added} yeni ilan eklendi. Dinleme açık, yeni gelenler otomatik alınır.`,
     };
   }
 
@@ -918,6 +1044,24 @@ class WhatsAppService {
         const name = meta.subject;
         this.groupNameCache.set(jid, name);
         return name;
+      }
+      if (this.sock && jid.endsWith("@newsletter")) {
+        const cached = this.knownChannels.get(jid);
+        if (cached?.name) {
+          this.groupNameCache.set(jid, cached.name);
+          return cached.name;
+        }
+        try {
+          const meta = await (this.sock as any).newsletterMetadata?.(
+            "jid",
+            jid,
+          );
+          const name = String(meta?.name ?? meta?.subject ?? jid);
+          this.registerChannel(jid, name, Number(meta?.subscribersCount ?? 0));
+          return name;
+        } catch {
+          /* ignore */
+        }
       }
     } catch {
       /* ignore */

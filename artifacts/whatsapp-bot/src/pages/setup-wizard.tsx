@@ -326,9 +326,10 @@ export default function SetupWizard() {
               <div className="flex items-start gap-3 rounded-lg border border-border p-4">
                 <Users className="w-5 h-5 mt-0.5 text-primary" />
                 <div className="space-y-1 text-sm">
-                  <p className="font-medium">İzlenecek grupları seç</p>
+                  <p className="font-medium">İzlenecek grup / kanal seç</p>
                   <p className="text-muted-foreground">
-                    Sonra Mesaj Havuzu sekmesinden ilanları çekebilirsiniz.
+                    Gruplar ve abone olduğunuz kanallar listelenir. Sonra Mesaj
+                    Havuzu sekmesinden ilanları çekebilirsiniz.
                   </p>
                 </div>
               </div>
@@ -353,7 +354,9 @@ export default function SetupWizard() {
                   >
                     <span className="font-medium">{g.name}</span>
                     <span className="text-muted-foreground ml-2 text-xs">
-                      {g.participantCount} üye
+                      {g.type === 'channel'
+                        ? 'Kanal'
+                        : `${g.participantCount} üye`}
                     </span>
                   </button>
                 ))}
