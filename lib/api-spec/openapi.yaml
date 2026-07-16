@@ -313,10 +313,13 @@ components:
 
     MessageStats:
       type: object
-      required: [total, groups, listening]
+      required: [total, groups, listening, selectedGroupCount]
       properties:
         total:
           type: integer
+        selectedGroupCount:
+          type: integer
+          description: Number of groups selected for listening
         groups:
           type: array
           items:

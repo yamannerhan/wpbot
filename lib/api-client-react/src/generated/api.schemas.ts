@@ -96,6 +96,8 @@ export type MessageStatsGroupsItem = {
 
 export interface MessageStats {
   total: number;
+  /** Number of groups selected for listening */
+  selectedGroupCount: number;
   groups: MessageStatsGroupsItem[];
   listening: boolean;
   /** @nullable */

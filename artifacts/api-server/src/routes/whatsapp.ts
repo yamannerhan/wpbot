@@ -182,7 +182,7 @@ router.delete("/whatsapp/messages", async (req, res): Promise<void> => {
 
 // GET /whatsapp/messages/stats
 router.get("/whatsapp/messages/stats", async (req, res): Promise<void> => {
-  const [totalResult, groupStats] = await Promise.all([
+  const [totalResult, groupStats, selectedGroupIds] = await Promise.all([
     db
       .select({ count: sql<number>`count(*)` })
       .from(whatsappMessagesTable),
@@ -197,6 +197,7 @@ router.get("/whatsapp/messages/stats", async (req, res): Promise<void> => {
         whatsappMessagesTable.groupId,
         whatsappMessagesTable.groupName
       ),
+    whatsappService.getSelectedGroupIds(),
   ]);
 
   const config = await db
@@ -210,6 +211,7 @@ router.get("/whatsapp/messages/stats", async (req, res): Promise<void> => {
 
   res.json({
     total: Number(totalResult[0]?.count ?? 0),
+    selectedGroupCount: selectedGroupIds.length,
     groups: groupStats.map((g) => ({
       groupId: g.groupId,
       groupName: g.groupName,

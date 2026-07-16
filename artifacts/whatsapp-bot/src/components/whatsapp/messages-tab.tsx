@@ -117,7 +117,9 @@ export function MessagesTab() {
             <Users className="w-4 h-4 text-muted-foreground" />
             <p className="text-xs text-muted-foreground uppercase font-semibold tracking-wider">Dinlenen Grup</p>
           </div>
-          <p className="text-3xl font-bold font-mono">{stats?.groups?.length || 0}</p>
+          <p className="text-3xl font-bold font-mono">
+            {stats?.selectedGroupCount ?? stats?.groups?.length ?? 0}
+          </p>
         </Card>
         
         <Card className="bg-card/80 backdrop-blur border-border/50 p-4 shadow-sm flex flex-col justify-center">

@@ -1,4 +1,4 @@
-import { pgTable, text, serial, timestamp, integer, unique } from "drizzle-orm/pg-core";
+import { pgTable, text, serial, timestamp, integer, unique, index } from "drizzle-orm/pg-core";
 
 export const whatsappMessagesTable = pgTable(
   "whatsapp_messages",
@@ -12,7 +12,10 @@ export const whatsappMessagesTable = pgTable(
     timestamp: timestamp("timestamp").notNull(),
     fetchedAt: timestamp("fetched_at").notNull().defaultNow(),
   },
-  (table) => [unique("wa_msg_group_uniq").on(table.messageId, table.groupId)]
+  (table) => [
+    unique("wa_msg_group_uniq").on(table.messageId, table.groupId),
+    index("wa_msg_group_ts_idx").on(table.groupId, table.timestamp),
+  ],
 );
 
 export const whatsappConfigTable = pgTable("whatsapp_config", {

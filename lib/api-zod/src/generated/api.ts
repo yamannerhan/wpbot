@@ -155,6 +155,7 @@ export const ClearMessagesResponse = zod.object({
  */
 export const GetMessageStatsResponse = zod.object({
   "total": zod.number(),
+  "selectedGroupCount": zod.number(),
   "groups": zod.array(zod.object({
   "groupId": zod.string(),
   "groupName": zod.string(),

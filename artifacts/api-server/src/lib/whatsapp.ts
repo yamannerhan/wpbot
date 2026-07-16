@@ -15,7 +15,7 @@ import fs from "node:fs/promises";
 import { logger } from "./logger.js";
 import { db } from "@workspace/db";
 import { whatsappMessagesTable, whatsappConfigTable } from "@workspace/db";
-import { eq, desc } from "drizzle-orm";
+import { eq, desc, asc, inArray, sql } from "drizzle-orm";
 import pino from "pino";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -71,6 +71,7 @@ class WhatsAppService {
   private pendingPhone: string | undefined;
   private pairingRequested = false;
   private reconnectTimer: NodeJS.Timeout | null = null;
+  private historyBatchWaiters: Array<() => void> = [];
 
   getStatus(): WAStatus {
     return { ...this.status };
@@ -306,6 +307,9 @@ class WhatsAppService {
         this.cacheMessageKeys(messages);
         if (type === "notify" || type === "append" || type === "prepend") {
           await this.processMessages(messages, type !== "notify");
+          if (type === "append" || type === "prepend") {
+            this.notifyHistoryBatch();
+          }
         }
       });
 
@@ -320,6 +324,7 @@ class WhatsAppService {
           if (messages && messages.length > 0) {
             await this.processMessages(messages, true);
           }
+          this.notifyHistoryBatch();
         },
       );
     } catch (err) {
@@ -481,9 +486,36 @@ class WhatsAppService {
     }
   }
 
+  private notifyHistoryBatch(): void {
+    const waiters = this.historyBatchWaiters.splice(0);
+    for (const w of waiters) w();
+  }
+
+  private waitForHistoryBatch(timeoutMs = 4500): Promise<boolean> {
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.historyBatchWaiters = this.historyBatchWaiters.filter(
+          (w) => w !== onBatch,
+        );
+        resolve(false);
+      }, timeoutMs);
+      const onBatch = () => {
+        clearTimeout(timer);
+        resolve(true);
+      };
+      this.historyBatchWaiters.push(onBatch);
+    });
+  }
+
+  private async countPoolMessages(): Promise<number> {
+    const rows = await db
+      .select({ count: sql<number>`count(*)` })
+      .from(whatsappMessagesTable);
+    return Number(rows[0]?.count ?? 0);
+  }
+
   /**
-   * Trigger on-demand history for selected groups.
-   * Requires a real message key (from live traffic or DB). Timestamp must be SECONDS.
+   * Pull up to ~15 days of history for each selected group (paginated).
    */
   async fetchHistory(): Promise<{ triggered: number; storedHint: string }> {
     if (!this.sock || !this.status.connected) {
@@ -498,40 +530,64 @@ class WhatsAppService {
       };
     }
 
+    const beforeCount = await this.countPoolMessages();
+    const fifteenDaysAgoSec = Math.floor(
+      (Date.now() - 15 * 24 * 60 * 60 * 1000) / 1000,
+    );
     let triggered = 0;
 
     for (const jid of selectedGroupIds) {
       try {
-        const keyInfo = await this.resolveMessageKey(jid);
-        if (!keyInfo) {
-          logger.warn(
-            { jid },
-            "No message key yet for history sync — will capture new messages live",
-          );
-          // Nudge WhatsApp to sync this chat
-          try {
-            await this.sock.presenceSubscribe(jid);
-          } catch {
-            /* ignore */
+        await this.sock.presenceSubscribe(jid).catch(() => undefined);
+
+        // Up to 10 pages backwards per group (~50 msgs each)
+        for (let round = 0; round < 10; round++) {
+          const oldest = await this.resolveOldestMessageKey(jid);
+          const newest = await this.resolveNewestMessageKey(jid);
+          const keyInfo = oldest ?? newest;
+
+          if (!keyInfo?.key?.id) {
+            logger.warn(
+              { jid, round },
+              "No message key yet — waiting for live traffic",
+            );
+            break;
           }
-          continue;
+
+          if (oldest && oldest.tsSeconds <= fifteenDaysAgoSec) {
+            logger.info({ jid }, "Reached 15-day boundary for group");
+            break;
+          }
+
+          const tsSeconds =
+            keyInfo.tsSeconds > 1e12
+              ? Math.floor(keyInfo.tsSeconds / 1000)
+              : keyInfo.tsSeconds;
+
+          logger.info(
+            { jid, round, msgId: keyInfo.key.id, tsSeconds },
+            "History page request",
+          );
+
+          const prevOldestTs = oldest?.tsSeconds ?? null;
+          await this.sock.fetchMessageHistory(50, keyInfo.key, tsSeconds);
+          triggered++;
+
+          await this.waitForHistoryBatch(5000);
+          await new Promise((r) => setTimeout(r, 400));
+
+          const nextOldest = await this.resolveOldestMessageKey(jid);
+          if (
+            !nextOldest ||
+            (prevOldestTs !== null && nextOldest.tsSeconds >= prevOldestTs)
+          ) {
+            // No older messages arrived
+            if (round > 0) break;
+            break;
+          }
         }
-
-        const tsSeconds =
-          keyInfo.tsSeconds > 1e12
-            ? Math.floor(keyInfo.tsSeconds / 1000)
-            : keyInfo.tsSeconds;
-
-        logger.info(
-          { jid, msgId: keyInfo.key.id, tsSeconds },
-          "Triggering on-demand history sync",
-        );
-
-        await this.sock.fetchMessageHistory(100, keyInfo.key, tsSeconds);
-        triggered++;
-        await new Promise((r) => setTimeout(r, 600));
       } catch (err) {
-        logger.error({ err, jid }, "Failed to trigger history sync");
+        logger.error({ err, jid }, "Failed to fetch history for group");
       }
     }
 
@@ -546,29 +602,33 @@ class WhatsAppService {
         set: { lastFetchAt: this.lastFetchAt },
       });
 
-    // Give history events a moment to land
-    await new Promise((r) => setTimeout(r, 2500));
+    // Final settle for late history chunks
+    await new Promise((r) => setTimeout(r, 3000));
+    const afterCount = await this.countPoolMessages();
+    const added = Math.max(0, afterCount - beforeCount);
 
     logger.info(
-      { triggered, total: selectedGroupIds.length },
-      "History sync triggered",
+      { triggered, added, groups: selectedGroupIds.length },
+      "History sync finished",
     );
 
-    if (triggered === 0) {
+    if (triggered === 0 && added === 0) {
       return {
         triggered: 0,
         storedHint:
-          "Henüz geçmiş anahtarı yok. Gruplarda yeni mesaj gelince otomatik kaydedilir; sonra tekrar 'Geçmiş Çek' deneyin.",
+          "Geçmiş için henüz anahtar yok. Seçili gruplarda bir mesaj gelsin, sonra tekrar 'Geçmiş Çek' deneyin. (WhatsApp tüm 15 günü vermeyebilir)",
       };
     }
 
     return {
       triggered,
-      storedHint: `${triggered} grup için geçmiş isteği gönderildi. Mesajlar birkaç saniye içinde havuza düşer.`,
+      storedHint: `${selectedGroupIds.length} grup tarandı — havuza ${added} yeni mesaj eklendi (aynı içerikler atlandı).`,
     };
   }
 
-  private async resolveMessageKey(jid: string): Promise<CachedMsgKey | null> {
+  private async resolveNewestMessageKey(
+    jid: string,
+  ): Promise<CachedMsgKey | null> {
     const cached = this.lastMsgKeyByJid.get(jid);
     if (cached?.key?.id) return cached;
 
@@ -594,9 +654,37 @@ class WhatsAppService {
         return info;
       }
     } catch (err) {
-      logger.debug({ err, jid }, "DB key lookup failed");
+      logger.debug({ err, jid }, "DB newest key lookup failed");
     }
 
+    return null;
+  }
+
+  private async resolveOldestMessageKey(
+    jid: string,
+  ): Promise<CachedMsgKey | null> {
+    try {
+      const rows = await db
+        .select()
+        .from(whatsappMessagesTable)
+        .where(eq(whatsappMessagesTable.groupId, jid))
+        .orderBy(asc(whatsappMessagesTable.timestamp))
+        .limit(1);
+
+      const oldest = rows[0];
+      if (oldest?.messageId) {
+        return {
+          key: {
+            id: oldest.messageId,
+            remoteJid: jid,
+            fromMe: false,
+          },
+          tsSeconds: Math.floor(oldest.timestamp.getTime() / 1000),
+        };
+      }
+    } catch (err) {
+      logger.debug({ err, jid }, "DB oldest key lookup failed");
+    }
     return null;
   }
 
@@ -639,6 +727,9 @@ class WhatsAppService {
       timestamp: Date;
     }> = [];
 
+    // Skip identical listing text within this batch
+    const batchContents = new Set<string>();
+
     for (const msg of messages) {
       if (!msg.key?.remoteJid || !msg.key?.id) continue;
 
@@ -657,15 +748,20 @@ class WhatsAppService {
       if (!matchedJid) continue;
 
       const text = extractText(msg);
-      if (!text || text.trim().length === 0) continue;
+      if (!text) continue;
+      const content = normalizeListingContent(text);
+      if (!content) continue;
+
+      // Identical listing content → skip (pool-wide uniqueness)
+      if (batchContents.has(content)) continue;
+      batchContents.add(content);
 
       let tsSeconds = Number(msg.messageTimestamp ?? 0);
       if (tsSeconds > 1e12) tsSeconds = Math.floor(tsSeconds / 1000);
-      const msgDate = tsSeconds
-        ? new Date(tsSeconds * 1000)
-        : new Date();
+      const msgDate = tsSeconds ? new Date(tsSeconds * 1000) : new Date();
 
-      if (isHistory && tsSeconds && msgDate < fifteenDaysAgo) continue;
+      // History: only last 15 days. Live: also drop ancient backfills.
+      if (tsSeconds && msgDate < fifteenDaysAgo) continue;
 
       const sender = msg.key.fromMe
         ? (this.status.phone ?? "me")
@@ -680,7 +776,7 @@ class WhatsAppService {
         messageId: msg.key.id,
         groupId: matchedJid,
         groupName,
-        content: text.trim(),
+        content,
         sender: String(sender),
         timestamp: msgDate,
       });
@@ -689,9 +785,29 @@ class WhatsAppService {
     if (toInsert.length === 0) return;
 
     try {
+      // Drop rows whose content already exists in the pool (any group)
+      const contents = toInsert.map((r) => r.content);
+      const existing = await db
+        .select({ content: whatsappMessagesTable.content })
+        .from(whatsappMessagesTable)
+        .where(inArray(whatsappMessagesTable.content, contents));
+
+      const existingSet = new Set(
+        existing.map((e) => normalizeListingContent(e.content)),
+      );
+      const uniqueRows = toInsert.filter((r) => !existingSet.has(r.content));
+
+      if (uniqueRows.length === 0) {
+        logger.info(
+          { skipped: toInsert.length, isHistory },
+          "All messages were duplicate listings — skipped",
+        );
+        return;
+      }
+
       await db
         .insert(whatsappMessagesTable)
-        .values(toInsert)
+        .values(uniqueRows)
         .onConflictDoNothing();
 
       if (!isHistory) {
@@ -699,7 +815,14 @@ class WhatsAppService {
         this.nextFetchAt = new Date(Date.now() + 30 * 60 * 1000);
       }
 
-      logger.info({ count: toInsert.length, isHistory }, "Messages stored");
+      logger.info(
+        {
+          stored: uniqueRows.length,
+          duplicates: toInsert.length - uniqueRows.length,
+          isHistory,
+        },
+        "Messages stored",
+      );
     } catch (err) {
       logger.error({ err }, "Failed to store messages");
     }
@@ -746,6 +869,11 @@ class WhatsAppService {
     }
     this.nextFetchAt = null;
   }
+}
+
+/** Normalize listing text so identical posts are treated as the same. */
+function normalizeListingContent(text: string): string {
+  return text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
 }
 
 function extractText(msg: proto.IWebMessageInfo): string | null {
