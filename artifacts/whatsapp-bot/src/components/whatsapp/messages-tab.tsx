@@ -271,7 +271,6 @@ export function MessagesTab() {
             <MessageSquare className="w-16 h-16 opacity-10 mb-6" />
             <p className="text-lg">Havuzda henüz mesaj bulunmuyor.</p>
             <p className="text-sm mt-2 opacity-70 max-w-md text-center">
-            <p className="text-sm mt-2 opacity-70 max-w-md text-center">
               Seçili grup/kanallardaki mesajlar toplanır (kısa sohbet hariç).
               Sadece birebir aynı metin atlanır. Havuzu silince ilanlar arşive
               gider; &quot;Yeniden Tara&quot; arşiv + WhatsApp geçmişini tekrar
