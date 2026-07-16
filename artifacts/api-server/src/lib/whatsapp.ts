@@ -779,8 +779,10 @@ class WhatsAppService {
       timestamp: Date;
     }> = [];
 
-    // Skip identical listing text within this batch
+    // Skip only exact same listing text within this batch
     const batchContents = new Set<string>();
+    let skippedNotListing = 0;
+    let skippedExactDup = 0;
 
     for (const msg of messages) {
       if (!msg.key?.remoteJid || !msg.key?.id) continue;
@@ -805,10 +807,16 @@ class WhatsAppService {
       if (!content) continue;
 
       // Only özel güvenlik job listings — skip normal chat
-      if (!isPrivateSecurityJobListing(content)) continue;
+      if (!isPrivateSecurityJobListing(content)) {
+        skippedNotListing++;
+        continue;
+      }
 
-      // Exact same content only → duplicate (pool-wide)
-      if (batchContents.has(content)) continue;
+      // Exact same content only → duplicate (pool-wide / batch)
+      if (batchContents.has(content)) {
+        skippedExactDup++;
+        continue;
+      }
       batchContents.add(content);
 
       let tsSeconds = Number(msg.messageTimestamp ?? 0);
@@ -837,10 +845,18 @@ class WhatsAppService {
       });
     }
 
-    if (toInsert.length === 0) return;
+    if (toInsert.length === 0) {
+      if (skippedNotListing > 0 || skippedExactDup > 0) {
+        logger.info(
+          { skippedNotListing, skippedExactDup, isHistory },
+          "No new listings to store after filters",
+        );
+      }
+      return;
+    }
 
     try {
-      // Drop rows whose content already exists in the pool (any group)
+      // Drop rows whose content already exists in the pool (exact match only)
       const contents = toInsert.map((r) => r.content);
       const existing = await db
         .select({ content: whatsappMessagesTable.content })
@@ -851,11 +867,18 @@ class WhatsAppService {
         existing.map((e) => normalizeListingContent(e.content)),
       );
       const uniqueRows = toInsert.filter((r) => !existingSet.has(r.content));
+      const dbExactDup = toInsert.length - uniqueRows.length;
 
       if (uniqueRows.length === 0) {
         logger.info(
-          { skipped: toInsert.length, isHistory },
-          "All messages were duplicate listings — skipped",
+          {
+            skipped: toInsert.length,
+            skippedNotListing,
+            skippedExactDup,
+            dbExactDup,
+            isHistory,
+          },
+          "All candidate listings were exact duplicates — skipped",
         );
         return;
       }
@@ -873,10 +896,12 @@ class WhatsAppService {
       logger.info(
         {
           stored: uniqueRows.length,
-          duplicates: toInsert.length - uniqueRows.length,
+          skippedNotListing,
+          skippedExactDup,
+          dbExactDup,
           isHistory,
         },
-        "Messages stored",
+        "Listings stored",
       );
     } catch (err) {
       logger.error({ err }, "Failed to store messages");
@@ -929,7 +954,7 @@ class WhatsAppService {
   }
 }
 
-/** Normalize listing text so identical posts are treated as the same. */
+/** Exact listing text only — tiny salary/phone/name differences stay as separate ads. */
 function normalizeListingContent(text: string): string {
   return text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
 }
