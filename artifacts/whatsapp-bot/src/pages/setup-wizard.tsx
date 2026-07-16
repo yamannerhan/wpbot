@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useLocation } from 'wouter';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Input } from '@/components/ui/input';
 import {
   useGetWhatsappStatus,
   useConnectWhatsapp,
@@ -11,7 +12,7 @@ import {
   getGetSelectedGroupsQueryKey,
 } from '@workspace/api-client-react';
 import { useQueryClient } from '@tanstack/react-query';
-import { CheckCircle2, Circle, Database, Loader2, QrCode, Users, ArrowRight } from 'lucide-react';
+import { CheckCircle2, Circle, Database, Loader2, QrCode, Users, ArrowRight, KeyRound } from 'lucide-react';
 import { toast } from 'sonner';
 
 const SETUP_KEY = 'wa_setup_complete';
@@ -45,6 +46,8 @@ export default function SetupWizard() {
   const [setupInfo, setSetupInfo] = useState<SetupInfo | null>(null);
   const [checking, setChecking] = useState(true);
   const [selected, setSelected] = useState<string[]>([]);
+  const [loginMode, setLoginMode] = useState<'qr' | 'code'>('qr');
+  const [phone, setPhone] = useState('90');
   const queryClient = useQueryClient();
 
   const { data: status } = useGetWhatsappStatus({
@@ -52,7 +55,9 @@ export default function SetupWizard() {
       queryKey: getGetWhatsappStatusQueryKey(),
       refetchInterval: (query) => {
         const state = (query.state.data as { state?: string } | undefined)?.state;
-        return state === 'connecting' || state === 'qr_ready' ? 2000 : false;
+        return state === 'connecting' || state === 'qr_ready' || state === 'pairing_code_ready'
+          ? 2000
+          : false;
       },
       enabled: step >= 2,
     },
@@ -106,14 +111,35 @@ export default function SetupWizard() {
     setLocation('/');
   };
 
-  const handleConnect = () => {
-    connect.mutate(undefined, {
-      onSuccess: () => {
-        queryClient.invalidateQueries({ queryKey: getGetWhatsappStatusQueryKey() });
-        toast.success('QR kod hazırlanıyor…');
+  const handleQrConnect = () => {
+    connect.mutate(
+      {},
+      {
+        onSuccess: () => {
+          queryClient.invalidateQueries({ queryKey: getGetWhatsappStatusQueryKey() });
+          toast.success('QR kod hazırlanıyor…');
+        },
+        onError: () => toast.error('Bağlantı başlatılamadı'),
       },
-      onError: () => toast.error('Bağlantı başlatılamadı'),
-    });
+    );
+  };
+
+  const handleCodeConnect = () => {
+    const digits = phone.replace(/\D/g, '');
+    if (digits.length < 10 || digits.length > 15) {
+      toast.error('Ülke kodu ile numara girin (örn. 905321234567)');
+      return;
+    }
+    connect.mutate(
+      { data: { phoneNumber: digits } },
+      {
+        onSuccess: () => {
+          queryClient.invalidateQueries({ queryKey: getGetWhatsappStatusQueryKey() });
+          toast.success('Eşleştirme kodu isteniyor…');
+        },
+        onError: () => toast.error('Kod oluşturulamadı'),
+      },
+    );
   };
 
   const toggleGroup = (id: string) => {
@@ -200,17 +226,28 @@ export default function SetupWizard() {
 
           {step === 2 && (
             <div className="space-y-4">
-              <div className="flex items-start gap-3 rounded-lg border border-border p-4">
-                <QrCode className="w-5 h-5 mt-0.5 text-primary" />
-                <div className="space-y-1 text-sm">
-                  <p className="font-medium">WhatsApp bağla</p>
-                  <p className="text-muted-foreground">
-                    QR kodu telefonunuzdaki WhatsApp → Bağlı Cihazlar ile okutun.
-                  </p>
-                </div>
+              <div className="grid grid-cols-2 gap-1 p-1 rounded-lg bg-muted/50 border border-border">
+                <button
+                  type="button"
+                  onClick={() => setLoginMode('qr')}
+                  className={`rounded-md px-3 py-2 text-sm font-medium ${
+                    loginMode === 'qr' ? 'bg-background shadow-sm' : 'text-muted-foreground'
+                  }`}
+                >
+                  QR Kod
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setLoginMode('code')}
+                  className={`rounded-md px-3 py-2 text-sm font-medium ${
+                    loginMode === 'code' ? 'bg-background shadow-sm' : 'text-muted-foreground'
+                  }`}
+                >
+                  Kod ile Giriş
+                </button>
               </div>
 
-              {status?.qrCode && (
+              {status?.qrCode && loginMode === 'qr' && (
                 <div className="flex justify-center">
                   <img
                     src={status.qrCode}
@@ -220,21 +257,60 @@ export default function SetupWizard() {
                 </div>
               )}
 
+              {status?.pairingCode && (
+                <div className="text-center space-y-2 rounded-xl border border-primary/30 bg-primary/10 p-4">
+                  <KeyRound className="w-5 h-5 text-primary mx-auto" />
+                  <p className="text-xs uppercase tracking-wide text-muted-foreground">Eşleştirme Kodu</p>
+                  <p className="font-mono text-3xl font-bold tracking-[0.2em] text-primary">
+                    {status.pairingCode}
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    WhatsApp → Bağlı Cihazlar → Telefon numarası ile bağla
+                  </p>
+                </div>
+              )}
+
               {status?.connected ? (
                 <p className="text-center text-green-500 text-sm font-medium">
                   Bağlandı{status.phone ? `: ${status.phone}` : ''}
                 </p>
-              ) : (
+              ) : loginMode === 'qr' ? (
                 <Button
                   className="w-full"
-                  onClick={handleConnect}
+                  onClick={handleQrConnect}
                   disabled={connect.isPending || status?.state === 'connecting' || status?.state === 'qr_ready'}
                 >
                   {(connect.isPending || status?.state === 'connecting') && (
                     <Loader2 className="w-4 h-4 mr-2 animate-spin" />
                   )}
+                  <QrCode className="w-4 h-4 mr-2" />
                   {status?.qrCode ? 'QR bekleniyor…' : 'QR Oluştur'}
                 </Button>
+              ) : (
+                <div className="space-y-3">
+                  <Input
+                    value={phone}
+                    onChange={(e) => setPhone(e.target.value)}
+                    placeholder="905321234567"
+                    inputMode="tel"
+                    className="font-mono text-center"
+                  />
+                  <Button
+                    className="w-full"
+                    onClick={handleCodeConnect}
+                    disabled={
+                      connect.isPending ||
+                      status?.state === 'connecting' ||
+                      status?.state === 'pairing_code_ready'
+                    }
+                  >
+                    {(connect.isPending || status?.state === 'connecting') && (
+                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                    )}
+                    <KeyRound className="w-4 h-4 mr-2" />
+                    {status?.pairingCode ? 'Kod bekleniyor…' : 'Kod Al'}
+                  </Button>
+                </div>
               )}
 
               {status?.connected && (
