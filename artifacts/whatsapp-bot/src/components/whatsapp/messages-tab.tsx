@@ -272,10 +272,9 @@ export function MessagesTab() {
             <MessageSquare className="w-16 h-16 opacity-10 mb-6" />
             <p className="text-lg">Havuzda henüz mesaj bulunmuyor.</p>
             <p className="text-sm mt-2 opacity-70 max-w-md text-center">
-              Seçili grup/kanallar taranır (max 15 gün geri). Havuzu sil →
-              Yeniden Tara ile derin tarama yapılır. Tarih = mesajın WhatsApp
-              gönderim zamanı (çekildiği an değil). Sadece birebir aynı metin
-              atlanır.
+              Grup + kanallar: max 15 gün geri (WhatsApp ne kadar verirse).
+              Bitmezse 5 dakikada kaldığı yerden devam eder. Tarih = gerçek
+              gönderim zamanı. Sadece birebir aynı metin atlanır.
             </p>
             {debouncedSearch && (
               <p className="text-sm mt-2 opacity-70">

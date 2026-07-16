@@ -1,4 +1,4 @@
-import { pgTable, text, serial, timestamp, integer, unique, index, bigint } from "drizzle-orm/pg-core";
+import { pgTable, text, serial, timestamp, integer, unique, index, bigint, boolean } from "drizzle-orm/pg-core";
 
 export const whatsappMessagesTable = pgTable(
   "whatsapp_messages",
@@ -46,6 +46,10 @@ export const whatsappChatCursorsTable = pgTable("whatsapp_chat_cursors", {
   oldestMessageId: text("oldest_message_id"),
   oldestTs: bigint("oldest_ts", { mode: "number" }),
   oldestParticipant: text("oldest_participant"),
+  /** Channel pagination cursor (server_id). */
+  channelServerId: text("channel_server_id"),
+  /** true = cannot go further back (or hit 15-day cap). */
+  lookbackComplete: boolean("lookback_complete").notNull().default(false),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 });
 

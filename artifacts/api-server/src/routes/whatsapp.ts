@@ -113,7 +113,7 @@ router.post("/whatsapp/messages/fetch", async (req, res): Promise<void> => {
   }
 
   try {
-    const result = await whatsappService.fetchHistory();
+    const result = await whatsappService.fetchHistory({ mode: "deep" });
     res.json({
       status: "ok",
       message: result.storedHint,
