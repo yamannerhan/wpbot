@@ -88,8 +88,16 @@ export function MessagesTab() {
           queryClient.invalidateQueries({ queryKey: getGetMessagesQueryKey() });
         };
         refresh();
-        setTimeout(refresh, 3000);
-        setTimeout(refresh, 8000);
+        setTimeout(refresh, 2000);
+        setTimeout(refresh, 6000);
+        setTimeout(refresh, 15000);
+        // Also kick an explicit history pull in case background scan needs a nudge
+        setTimeout(() => {
+          fetchHistory.mutate(undefined, {
+            onSuccess: () => refresh(),
+            onError: () => refresh(),
+          });
+        }, 1500);
       },
       onError: () => toast.error("Havuz sıfırlanamadı."),
     });
