@@ -1,6 +1,6 @@
 [build]
 builder = "NIXPACKS"
-buildCommand = "CI=true BASE_PATH=/ pnpm install --frozen-lockfile=false && BASE_PATH=/ pnpm run build:prod"
+buildCommand = "pnpm run build:prod"
 
 [deploy]
 startCommand = "pnpm run start:prod"

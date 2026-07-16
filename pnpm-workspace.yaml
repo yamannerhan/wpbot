@@ -1,14 +1,8 @@
 # ============================================================================
 # SECURITY: Minimum release age for npm packages (supply-chain attack defense)
 # ============================================================================
-minimumReleaseAge: 1440
-
-minimumReleaseAgeExclude:
-  - react
-  - react-dom
-  - typescript
-  - vite
-  - esbuild
+# Disabled for Railway CI reliability (was blocking fresh package versions)
+# minimumReleaseAge: 1440
 
 packages:
   - artifacts/*
