@@ -1,0 +1,26 @@
+{
+  "name": "whatsapp-ilan-toplayici",
+  "version": "1.0.0",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "preinstall": "node -e \"const ua=process.env.npm_config_user_agent||''; if(!ua.includes('pnpm')){console.error('Use pnpm instead'); process.exit(1)}\"",
+    "build": "pnpm run typecheck && pnpm -r --if-present run build",
+    "build:prod": "pnpm --filter @workspace/whatsapp-bot run build && pnpm --filter @workspace/api-server run build",
+    "typecheck:libs": "tsc --build",
+    "typecheck": "pnpm run typecheck:libs && pnpm -r --filter \"./artifacts/**\" --filter \"./scripts\" --if-present run typecheck",
+    "db:push": "pnpm --filter @workspace/db run push",
+    "start": "node --enable-source-maps artifacts/api-server/dist/index.mjs",
+    "start:prod": "pnpm run db:push && pnpm run start",
+    "dev:api": "pnpm --filter @workspace/api-server run dev",
+    "dev:web": "pnpm --filter @workspace/whatsapp-bot run dev"
+  },
+  "devDependencies": {
+    "prettier": "^3.9.5",
+    "typescript": "~5.9.3"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "pnpm@9.15.0"
+}

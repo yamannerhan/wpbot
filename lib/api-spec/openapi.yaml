@@ -1,0 +1,337 @@
+openapi: 3.1.0
+info:
+  # Do not change the title, if the title changes, the import paths will be broken
+  title: Api
+  version: 0.1.0
+  description: WhatsApp İlan Toplayıcı API
+servers:
+  - url: /api
+    description: Base API path
+tags:
+  - name: health
+    description: Health operations
+  - name: whatsapp
+    description: WhatsApp bot operations
+paths:
+  /healthz:
+    get:
+      operationId: healthCheck
+      tags: [health]
+      summary: Health check
+      description: Returns server health status
+      responses:
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+
+  /whatsapp/status:
+    get:
+      operationId: getWhatsappStatus
+      tags: [whatsapp]
+      summary: Get WhatsApp connection status
+      responses:
+        "200":
+          description: Connection status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WhatsAppStatus"
+
+  /whatsapp/connect:
+    post:
+      operationId: connectWhatsapp
+      tags: [whatsapp]
+      summary: Initiate WhatsApp connection via phone pairing code
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConnectInput"
+      responses:
+        "200":
+          description: Connection initiated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WhatsAppStatus"
+
+  /whatsapp/disconnect:
+    post:
+      operationId: disconnectWhatsapp
+      tags: [whatsapp]
+      summary: Disconnect WhatsApp
+      responses:
+        "200":
+          description: Disconnected
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WhatsAppStatus"
+
+  /whatsapp/groups:
+    get:
+      operationId: getWhatsappGroups
+      tags: [whatsapp]
+      summary: List all WhatsApp groups
+      responses:
+        "200":
+          description: List of groups
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/WhatsAppGroup"
+        "400":
+          description: Not connected
+
+  /whatsapp/groups/selected:
+    get:
+      operationId: getSelectedGroups
+      tags: [whatsapp]
+      summary: Get selected group IDs
+      responses:
+        "200":
+          description: Selected group IDs
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SelectedGroups"
+    post:
+      operationId: saveSelectedGroups
+      tags: [whatsapp]
+      summary: Save selected group IDs
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SelectedGroupsInput"
+      responses:
+        "200":
+          description: Saved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SelectedGroups"
+
+  /whatsapp/messages/fetch:
+    post:
+      operationId: fetchMessages
+      tags: [whatsapp]
+      summary: Fetch historical messages from selected groups (last 15 days)
+      responses:
+        "200":
+          description: Fetch started
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FetchResult"
+        "400":
+          description: No groups selected or not connected
+
+  /whatsapp/messages:
+    get:
+      operationId: getMessages
+      tags: [whatsapp]
+      summary: Get all messages from the pool
+      parameters:
+        - name: groupId
+          in: query
+          schema:
+            type: string
+        - name: search
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 100
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        "200":
+          description: Messages
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessagePage"
+    delete:
+      operationId: clearMessages
+      tags: [whatsapp]
+      summary: Clear all messages from pool
+      responses:
+        "200":
+          description: Cleared
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClearResult"
+
+  /whatsapp/messages/stats:
+    get:
+      operationId: getMessageStats
+      tags: [whatsapp]
+      summary: Get message pool statistics
+      responses:
+        "200":
+          description: Stats
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageStats"
+
+components:
+  schemas:
+    HealthStatus:
+      type: object
+      properties:
+        status:
+          type: string
+      required:
+        - status
+
+    ConnectInput:
+      type: object
+      properties:
+        phoneNumber:
+          type: string
+          description: Phone number with country code, digits only (e.g. 905321234567)
+
+    WhatsAppStatus:
+      type: object
+      required: [connected, state]
+      properties:
+        connected:
+          type: boolean
+        state:
+          type: string
+          enum: [disconnected, connecting, qr_ready, pairing_code_ready, connected]
+        qrCode:
+          type: ["string", "null"]
+        pairingCode:
+          type: ["string", "null"]
+        phone:
+          type: ["string", "null"]
+        pushName:
+          type: ["string", "null"]
+
+    WhatsAppGroup:
+      type: object
+      required: [id, name, type]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        participantCount:
+          type: integer
+        type:
+          type: string
+          enum: [group, channel]
+
+    SelectedGroups:
+      type: object
+      required: [groupIds]
+      properties:
+        groupIds:
+          type: array
+          items:
+            type: string
+        groups:
+          type: array
+          items:
+            $ref: "#/components/schemas/WhatsAppGroup"
+
+    SelectedGroupsInput:
+      type: object
+      required: [groupIds]
+      properties:
+        groupIds:
+          type: array
+          items:
+            type: string
+
+    FetchResult:
+      type: object
+      required: [status, message]
+      properties:
+        status:
+          type: string
+        message:
+          type: string
+        count:
+          type: integer
+
+    WhatsAppMessage:
+      type: object
+      required: [id, groupId, groupName, content, sender, timestamp]
+      properties:
+        id:
+          type: integer
+        messageId:
+          type: string
+        groupId:
+          type: string
+        groupName:
+          type: string
+        content:
+          type: string
+        sender:
+          type: string
+        timestamp:
+          type: string
+        fetchedAt:
+          type: string
+
+    MessagePage:
+      type: object
+      required: [messages, total]
+      properties:
+        messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/WhatsAppMessage"
+        total:
+          type: integer
+
+    ClearResult:
+      type: object
+      required: [deleted]
+      properties:
+        deleted:
+          type: integer
+
+    MessageStats:
+      type: object
+      required: [total, groups, listening]
+      properties:
+        total:
+          type: integer
+        groups:
+          type: array
+          items:
+            type: object
+            required: [groupId, groupName, count]
+            properties:
+              groupId:
+                type: string
+              groupName:
+                type: string
+              count:
+                type: integer
+        listening:
+          type: boolean
+        lastFetchAt:
+          type: ["string", "null"]
+        nextFetchAt:
+          type: ["string", "null"]

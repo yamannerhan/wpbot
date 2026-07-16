@@ -1,0 +1,19 @@
+providers = ["node", "pnpm"]
+
+[variables]
+NODE_ENV = "production"
+CI = "true"
+NPM_CONFIG_PRODUCTION = "false"
+PNPM_NODE_LINKER = "hoisted"
+
+[phases.setup]
+nixPkgs = ["nodejs_22", "pnpm"]
+
+[phases.install]
+cmds = ["pnpm install --frozen-lockfile=false --prod=false"]
+
+[phases.build]
+cmds = ["pnpm run build:prod"]
+
+[start]
+cmd = "pnpm run start:prod"
