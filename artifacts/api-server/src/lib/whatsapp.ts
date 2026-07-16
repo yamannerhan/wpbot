@@ -515,7 +515,10 @@ class WhatsAppService {
   }
 
   /**
-   * Pull up to ~15 days of history for each selected group (paginated).
+   * Pull history for selected groups:
+   * - Go back as far as WhatsApp allows, capped at 15 days
+   * - If fewer messages exist, stop when WhatsApp has nothing older
+   * Live listening continues separately via messages.upsert while connected.
    */
   async fetchHistory(): Promise<{ triggered: number; storedHint: string }> {
     if (!this.sock || !this.status.connected) {
@@ -540,8 +543,8 @@ class WhatsAppService {
       try {
         await this.sock.presenceSubscribe(jid).catch(() => undefined);
 
-        // Up to 10 pages backwards per group (~50 msgs each)
-        for (let round = 0; round < 10; round++) {
+        // Paginate backwards until 15-day cap OR WhatsApp has no older msgs
+        for (let round = 0; round < 25; round++) {
           const oldest = await this.resolveOldestMessageKey(jid);
           const newest = await this.resolveNewestMessageKey(jid);
           const keyInfo = oldest ?? newest;
@@ -549,13 +552,14 @@ class WhatsAppService {
           if (!keyInfo?.key?.id) {
             logger.warn(
               { jid, round },
-              "No message key yet — waiting for live traffic",
+              "No message key yet — live listener will catch new listings",
             );
             break;
           }
 
+          // Hard stop: do not request older than 15 days
           if (oldest && oldest.tsSeconds <= fifteenDaysAgoSec) {
-            logger.info({ jid }, "Reached 15-day boundary for group");
+            logger.info({ jid }, "Reached max 15-day lookback");
             break;
           }
 
@@ -573,16 +577,20 @@ class WhatsAppService {
           await this.sock.fetchMessageHistory(50, keyInfo.key, tsSeconds);
           triggered++;
 
-          await this.waitForHistoryBatch(5000);
-          await new Promise((r) => setTimeout(r, 400));
+          const gotBatch = await this.waitForHistoryBatch(5000);
+          await new Promise((r) => setTimeout(r, 350));
 
           const nextOldest = await this.resolveOldestMessageKey(jid);
+          // WhatsApp gave nothing older → stop (even if < 15 days)
           if (
+            !gotBatch ||
             !nextOldest ||
             (prevOldestTs !== null && nextOldest.tsSeconds >= prevOldestTs)
           ) {
-            // No older messages arrived
-            if (round > 0) break;
+            logger.info(
+              { jid, round },
+              "No older messages available — stopping lookback for group",
+            );
             break;
           }
         }
@@ -602,27 +610,26 @@ class WhatsAppService {
         set: { lastFetchAt: this.lastFetchAt },
       });
 
-    // Final settle for late history chunks
     await new Promise((r) => setTimeout(r, 3000));
     const afterCount = await this.countPoolMessages();
     const added = Math.max(0, afterCount - beforeCount);
 
     logger.info(
       { triggered, added, groups: selectedGroupIds.length },
-      "History sync finished",
+      "History sync finished — live listening remains active",
     );
 
     if (triggered === 0 && added === 0) {
       return {
         triggered: 0,
         storedHint:
-          "Geçmiş için henüz anahtar yok. Seçili gruplarda bir mesaj gelsin, sonra tekrar 'Geçmiş Çek' deneyin. (WhatsApp tüm 15 günü vermeyebilir)",
+          "Geçmiş az geldi veya anahtar yok. Dinleme açık: yeni ilan gelince otomatik havuza düşer. Bir mesaj sonrası tekrar 'Geçmiş Çek' deneyebilirsin.",
       };
     }
 
     return {
       triggered,
-      storedHint: `${selectedGroupIds.length} grup tarandı — havuza ${added} yeni mesaj eklendi (aynı içerikler atlandı).`,
+      storedHint: `${selectedGroupIds.length} grup tarandı (max 15 gün) — ${added} yeni ilan eklendi. Dinleme açık, yeni gelenler otomatik alınır.`,
     };
   }
 
@@ -760,8 +767,8 @@ class WhatsAppService {
       if (tsSeconds > 1e12) tsSeconds = Math.floor(tsSeconds / 1000);
       const msgDate = tsSeconds ? new Date(tsSeconds * 1000) : new Date();
 
-      // History: only last 15 days. Live: also drop ancient backfills.
-      if (tsSeconds && msgDate < fifteenDaysAgo) continue;
+      // History lookback capped at 15 days. Live messages always accepted.
+      if (isHistory && tsSeconds && msgDate < fifteenDaysAgo) continue;
 
       const sender = msg.key.fromMe
         ? (this.status.phone ?? "me")
@@ -849,9 +856,12 @@ class WhatsAppService {
 
   private startListening(): void {
     this.stopListening();
+    // Live listings are captured in real time via messages.upsert while connected.
+    // Periodic fetch tops up anything WhatsApp exposes within the 15-day window.
     this.nextFetchAt = new Date(Date.now() + 30 * 60 * 1000);
     this.listeningInterval = setInterval(async () => {
-      logger.info("30-minute sync — fetching history");
+      if (!this.status.connected || !this.sock) return;
+      logger.info("Periodic sync — still listening, refreshing history window");
       this.nextFetchAt = new Date(Date.now() + 30 * 60 * 1000);
       try {
         await this.fetchHistory();
@@ -859,7 +869,7 @@ class WhatsAppService {
         logger.error({ err }, "Scheduled history fetch failed");
       }
     }, 30 * 60 * 1000);
-    logger.info("Started listening for new messages");
+    logger.info("Continuous listening ON — new listings go to pool immediately");
   }
 
   private stopListening(): void {

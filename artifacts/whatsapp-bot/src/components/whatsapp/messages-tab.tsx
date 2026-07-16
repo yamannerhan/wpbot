@@ -171,7 +171,7 @@ export function MessagesTab() {
             className="gap-2 bg-background whitespace-nowrap"
           >
             {fetchHistory.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <History className="w-4 h-4" />}
-            Geçmiş Çek (15 Gün)
+            Geçmiş Tara (max 15 gün)
           </Button>
 
           <AlertDialog>
