@@ -58,12 +58,21 @@ export function MessagesTab() {
 
   const handleFetchHistory = () => {
     fetchHistory.mutate(undefined, {
-      onSuccess: () => {
-        toast.success("Geçmiş mesajları çekme işlemi başlatıldı.");
-        queryClient.invalidateQueries({ queryKey: getGetMessageStatsQueryKey() });
-        queryClient.invalidateQueries({ queryKey: getGetMessagesQueryKey() });
+      onSuccess: (data) => {
+        const msg =
+          (data as { message?: string })?.message ||
+          "Geçmiş mesajları çekme işlemi başlatıldı.";
+        toast.success(msg);
+        // History arrives async — refresh a few times
+        const refresh = () => {
+          queryClient.invalidateQueries({ queryKey: getGetMessageStatsQueryKey() });
+          queryClient.invalidateQueries({ queryKey: getGetMessagesQueryKey() });
+        };
+        refresh();
+        setTimeout(refresh, 3000);
+        setTimeout(refresh, 8000);
       },
-      onError: () => toast.error("İşlem başlatılamadı.")
+      onError: () => toast.error("İşlem başlatılamadı. Grup seçili ve WhatsApp bağlı mı?"),
     });
   };
 
@@ -199,6 +208,10 @@ export function MessagesTab() {
           <div className="flex-1 flex flex-col items-center justify-center text-muted-foreground">
             <MessageSquare className="w-16 h-16 opacity-10 mb-6" />
             <p className="text-lg">Havuzda henüz mesaj bulunmuyor.</p>
+            <p className="text-sm mt-2 opacity-70 max-w-md text-center">
+              Gruplar sekmesinden grup seçin. Yeni gelen mesajlar otomatik kaydolur.
+              İlk mesajdan sonra &quot;Geçmiş Çek&quot; ile daha fazla çekebilirsiniz.
+            </p>
             {debouncedSearch && <p className="text-sm mt-2 opacity-70">Arama kriterlerinizi değiştirerek tekrar deneyin.</p>}
           </div>
         ) : (

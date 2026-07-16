@@ -107,11 +107,11 @@ router.post("/whatsapp/messages/fetch", async (req, res): Promise<void> => {
   }
 
   try {
-    const count = await whatsappService.fetchHistory();
+    const result = await whatsappService.fetchHistory();
     res.json({
       status: "ok",
-      message: `${count} mesaj havuzda bulunuyor`,
-      count,
+      message: result.storedHint,
+      count: result.triggered,
     });
   } catch (err) {
     req.log.error({ err }, "Failed to fetch history");
