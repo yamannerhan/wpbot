@@ -271,9 +271,11 @@ export function MessagesTab() {
             <MessageSquare className="w-16 h-16 opacity-10 mb-6" />
             <p className="text-lg">Havuzda henüz mesaj bulunmuyor.</p>
             <p className="text-sm mt-2 opacity-70 max-w-md text-center">
-              Özel güvenlik ilanları toplanır (filtre gevşek). Sadece birebir
-              aynı metin atlanır. Grup + kanal seçip &quot;Yeniden Tara (15
-              gün)&quot; ile geçmişi çekin.
+            <p className="text-sm mt-2 opacity-70 max-w-md text-center">
+              Seçili grup/kanallardaki mesajlar toplanır (kısa sohbet hariç).
+              Sadece birebir aynı metin atlanır. Havuzu silince ilanlar arşive
+              gider; &quot;Yeniden Tara&quot; arşiv + WhatsApp geçmişini tekrar
+              yükler.
             </p>
             {debouncedSearch && (
               <p className="text-sm mt-2 opacity-70">

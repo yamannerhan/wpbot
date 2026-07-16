@@ -14,8 +14,13 @@ import { fileURLToPath } from "node:url";
 import fs from "node:fs/promises";
 import { logger } from "./logger.js";
 import { db } from "@workspace/db";
-import { whatsappMessagesTable, whatsappConfigTable } from "@workspace/db";
-import { eq, desc, inArray, sql } from "drizzle-orm";
+import {
+  whatsappMessagesTable,
+  whatsappMessagesArchiveTable,
+  whatsappChatCursorsTable,
+  whatsappConfigTable,
+} from "@workspace/db";
+import { eq, desc, inArray, sql, gte } from "drizzle-orm";
 import pino from "pino";
 import { isPrivateSecurityJobListing } from "./listing-filter.js";
 
@@ -85,6 +90,9 @@ class WhatsAppService {
   private pairingRequested = false;
   private reconnectTimer: NodeJS.Timeout | null = null;
   private historyBatchWaiters: Array<() => void> = [];
+  private scanSeenMessages = 0;
+  private scanStoredListings = 0;
+  private forcingHistoryResync = false;
 
   getStatus(): WAStatus {
     return { ...this.status };
@@ -624,43 +632,197 @@ class WhatsAppService {
   }
 
   /**
-   * Wipe message pool only. Does NOT rescan — use fetchHistory separately.
-   * Keeps in-memory WA cursors so "Yeniden Tara" can still walk history.
-   * Duplicate check is exact content only; after clear, same texts can return.
+   * Wipe message pool only. Copies rows to archive first so Yeniden Tara
+   * can restore them (WhatsApp rarely re-sends full history after clear).
    */
   async clearPoolOnly(): Promise<{ deleted: number; message: string }> {
     const snapshot = await db.select().from(whatsappMessagesTable);
     const deleted = snapshot.length;
 
-    // Preserve cursors from wiped rows (fallback if live cache is empty)
-    for (const row of snapshot) {
-      const tsSeconds = Math.floor(
-        (row.timestamp instanceof Date
-          ? row.timestamp
-          : new Date(row.timestamp as unknown as string)
-        ).getTime() / 1000,
-      );
-      const info: CachedMsgKey = {
-        key: {
-          id: row.messageId,
-          remoteJid: row.groupId,
-          fromMe: false,
-        },
-        tsSeconds,
-      };
-      this.rememberMsgKey(row.groupId, info);
+    if (snapshot.length > 0) {
+      await db
+        .insert(whatsappMessagesArchiveTable)
+        .values(
+          snapshot.map((row) => ({
+            messageId: row.messageId,
+            groupId: row.groupId,
+            groupName: row.groupName,
+            content: row.content,
+            sender: row.sender,
+            timestamp: row.timestamp,
+            fetchedAt: row.fetchedAt,
+          })),
+        )
+        .onConflictDoNothing();
+
+      for (const row of snapshot) {
+        const tsSeconds = Math.floor(
+          (row.timestamp instanceof Date
+            ? row.timestamp
+            : new Date(row.timestamp as unknown as string)
+          ).getTime() / 1000,
+        );
+        this.rememberMsgKey(row.groupId, {
+          key: {
+            id: row.messageId,
+            remoteJid: row.groupId,
+            fromMe: false,
+          },
+          tsSeconds,
+        });
+      }
+      await this.persistCursorsToDb();
     }
 
     await db.delete(whatsappMessagesTable);
-    logger.info({ deleted }, "Pool cleared (no auto-rescan)");
+    logger.info({ deleted }, "Pool cleared — archived for rescan restore");
 
     return {
       deleted,
       message:
         deleted > 0
-          ? `Havuz temizlendi (${deleted} ilan silindi). Yeniden tarama için "Yeniden Tara"ya bas.`
+          ? `Havuz temizlendi (${deleted} ilan arşive alındı). "Yeniden Tara" ile geri yüklenir + WhatsApp geçmişi çekilir.`
           : "Havuz zaten boş.",
     };
+  }
+
+  /** Put archived listings back into the pool (15-day window, exact-text unique). */
+  private async restorePoolFromArchive(): Promise<number> {
+    const since = new Date(Date.now() - HISTORY_LOOKBACK_MS);
+    const rows = await db
+      .select()
+      .from(whatsappMessagesArchiveTable)
+      .where(gte(whatsappMessagesArchiveTable.timestamp, since));
+
+    if (rows.length === 0) return 0;
+
+    const existing = await db
+      .select({ content: whatsappMessagesTable.content })
+      .from(whatsappMessagesTable);
+    const existingContent = new Set(
+      existing.map((e) => normalizeListingContent(e.content)),
+    );
+
+    const toRestore: Array<{
+      messageId: string;
+      groupId: string;
+      groupName: string;
+      content: string;
+      sender: string;
+      timestamp: Date;
+    }> = [];
+    const batchContents = new Set<string>();
+
+    for (const row of rows) {
+      const content = normalizeListingContent(row.content);
+      if (!content || !isPrivateSecurityJobListing(content)) continue;
+      if (existingContent.has(content) || batchContents.has(content)) continue;
+      batchContents.add(content);
+      toRestore.push({
+        messageId: row.messageId,
+        groupId: row.groupId,
+        groupName: row.groupName,
+        content,
+        sender: row.sender,
+        timestamp: row.timestamp,
+      });
+    }
+
+    if (toRestore.length === 0) return 0;
+
+    await db
+      .insert(whatsappMessagesTable)
+      .values(toRestore)
+      .onConflictDoNothing();
+    logger.info(
+      { restored: toRestore.length },
+      "Restored listings from archive",
+    );
+    return toRestore.length;
+  }
+
+  private async persistCursorsToDb(): Promise<void> {
+    const jids = new Set([
+      ...this.newestMsgKeyByJid.keys(),
+      ...this.oldestMsgKeyByJid.keys(),
+    ]);
+    for (const groupId of jids) {
+      const newest = this.newestMsgKeyByJid.get(groupId);
+      const oldest = this.oldestMsgKeyByJid.get(groupId);
+      if (!newest?.key?.id && !oldest?.key?.id) continue;
+      try {
+        await db
+          .insert(whatsappChatCursorsTable)
+          .values({
+            groupId,
+            newestMessageId: newest?.key?.id ?? null,
+            newestTs: newest?.tsSeconds ?? null,
+            oldestMessageId: oldest?.key?.id ?? null,
+            oldestTs: oldest?.tsSeconds ?? null,
+            updatedAt: new Date(),
+          })
+          .onConflictDoUpdate({
+            target: whatsappChatCursorsTable.groupId,
+            set: {
+              newestMessageId: newest?.key?.id ?? null,
+              newestTs: newest?.tsSeconds ?? null,
+              oldestMessageId: oldest?.key?.id ?? null,
+              oldestTs: oldest?.tsSeconds ?? null,
+              updatedAt: new Date(),
+            },
+          });
+      } catch (err) {
+        logger.debug({ err, groupId }, "Cursor persist failed");
+      }
+    }
+  }
+
+  private async loadCursorFromDb(jid: string): Promise<CachedMsgKey | null> {
+    try {
+      const rows = await db
+        .select()
+        .from(whatsappChatCursorsTable)
+        .where(eq(whatsappChatCursorsTable.groupId, jid))
+        .limit(1);
+      const row = rows[0];
+      if (!row) return null;
+
+      if (row.newestMessageId && row.newestTs) {
+        this.rememberMsgKey(jid, {
+          key: {
+            id: row.newestMessageId,
+            remoteJid: jid,
+            fromMe: false,
+          },
+          tsSeconds: Number(row.newestTs),
+        });
+      }
+      if (row.oldestMessageId && row.oldestTs) {
+        const oldest: CachedMsgKey = {
+          key: {
+            id: row.oldestMessageId,
+            remoteJid: jid,
+            fromMe: false,
+          },
+          tsSeconds: Number(row.oldestTs),
+        };
+        this.rememberMsgKey(jid, oldest);
+        return oldest;
+      }
+      if (row.newestMessageId && row.newestTs) {
+        return {
+          key: {
+            id: row.newestMessageId,
+            remoteJid: jid,
+            fromMe: false,
+          },
+          tsSeconds: Number(row.newestTs),
+        };
+      }
+    } catch (err) {
+      logger.debug({ err, jid }, "Cursor load failed");
+    }
+    return null;
   }
 
   private notifyHistoryBatch(): void {
@@ -692,10 +854,10 @@ class WhatsAppService {
   }
 
   /**
-   * Pull history for selected groups:
-   * - Paginate using ALL WhatsApp message keys (not only stored listings)
-   * - Cap at 15 days; stop when WA has nothing older
-   * Live listening continues via messages.upsert.
+   * Pull history for selected groups/channels:
+   * 1) Restore from archive (survives pool clear)
+   * 2) Paginate WhatsApp history (15-day cap)
+   * 3) If still empty, soft-reconnect once to force history sync
    */
   async fetchHistory(): Promise<{ triggered: number; storedHint: string }> {
     if (!this.sock || !this.status.connected) {
@@ -706,11 +868,17 @@ class WhatsAppService {
     if (selectedGroupIds.length === 0) {
       return {
         triggered: 0,
-        storedHint: "Önce Gruplar sekmesinden grup seçin",
+        storedHint: "Önce Gruplar & Kanallar sekmesinden kaynak seçin",
       };
     }
 
+    this.scanSeenMessages = 0;
+    this.scanStoredListings = 0;
     const beforeCount = await this.countPoolMessages();
+
+    const restored = await this.restorePoolFromArchive();
+    logger.info({ restored }, "Archive restore step done");
+
     const fifteenDaysAgoSec = Math.floor(
       (Date.now() - HISTORY_LOOKBACK_MS) / 1000,
     );
@@ -721,15 +889,16 @@ class WhatsAppService {
         await this.sock.presenceSubscribe(jid).catch(() => undefined);
 
         for (let round = 0; round < HISTORY_MAX_ROUNDS; round++) {
-          const cursor =
+          let cursor =
             this.oldestMsgKeyByJid.get(jid) ??
             this.newestMsgKeyByJid.get(jid) ??
-            (await this.resolveNewestMessageKeyFromDb(jid));
+            (await this.resolveNewestMessageKeyFromDb(jid)) ??
+            (await this.loadCursorFromDb(jid));
 
           if (!cursor?.key?.id) {
             logger.warn(
               { jid, round },
-              "No message key yet — live listener will catch new listings",
+              "No message key yet — will try soft resync if pool stays empty",
             );
             break;
           }
@@ -741,16 +910,6 @@ class WhatsAppService {
 
           const prevOldestTs =
             this.oldestMsgKeyByJid.get(jid)?.tsSeconds ?? cursor.tsSeconds;
-
-          logger.info(
-            {
-              jid,
-              round,
-              msgId: cursor.key.id,
-              tsSeconds: cursor.tsSeconds,
-            },
-            "History page request",
-          );
 
           await this.sock.fetchMessageHistory(
             HISTORY_PAGE_SIZE,
@@ -770,7 +929,13 @@ class WhatsAppService {
 
           if (!advanced) {
             logger.info(
-              { jid, round, gotBatch, prevOldestTs, nextTs: nextOldest?.tsSeconds },
+              {
+                jid,
+                round,
+                gotBatch,
+                prevOldestTs,
+                nextTs: nextOldest?.tsSeconds,
+              },
               "No older messages available — stopping lookback for group",
             );
             break;
@@ -786,6 +951,39 @@ class WhatsAppService {
       }
     }
 
+    await this.persistCursorsToDb();
+    await new Promise((r) => setTimeout(r, 2000));
+
+    let afterCount = await this.countPoolMessages();
+    let added = Math.max(0, afterCount - beforeCount);
+
+    // WhatsApp often won't re-send history after clear — force one soft reconnect
+    if (
+      added === 0 &&
+      restored === 0 &&
+      !this.forcingHistoryResync &&
+      this.status.connected
+    ) {
+      this.forcingHistoryResync = true;
+      try {
+        logger.info("Pool still empty — soft reconnect to force history sync");
+        await this.connect(undefined, { source: "reconnect" });
+        const deadline = Date.now() + 25_000;
+        while (Date.now() < deadline && this.status.state !== "connected") {
+          await new Promise((r) => setTimeout(r, 500));
+        }
+        await new Promise((r) => setTimeout(r, 8_000));
+        afterCount = await this.countPoolMessages();
+        added = Math.max(0, afterCount - beforeCount);
+      } catch (err) {
+        logger.error({ err }, "Soft history resync failed");
+      } finally {
+        setTimeout(() => {
+          this.forcingHistoryResync = false;
+        }, 60_000);
+      }
+    }
+
     this.lastFetchAt = new Date();
     this.nextFetchAt = new Date(Date.now() + LISTEN_INTERVAL_MS);
 
@@ -797,26 +995,31 @@ class WhatsAppService {
         set: { lastFetchAt: this.lastFetchAt },
       });
 
-    await new Promise((r) => setTimeout(r, 2500));
-    const afterCount = await this.countPoolMessages();
-    const added = Math.max(0, afterCount - beforeCount);
-
     logger.info(
-      { triggered, added, groups: selectedGroupIds.length },
+      {
+        triggered,
+        added,
+        restored,
+        seen: this.scanSeenMessages,
+        groups: selectedGroupIds.length,
+      },
       "History sync finished — live listening remains active",
     );
 
-    if (triggered === 0 && added === 0) {
+    if (added === 0 && restored === 0) {
       return {
-        triggered: 0,
+        triggered,
         storedHint:
-          "Geçmiş az geldi veya anahtar yok. Dinleme açık: yeni ilan gelince otomatik havuza düşer. Bir mesaj sonrası tekrar 'Yeniden Tara' deneyebilirsin.",
+          `${selectedGroupIds.length} kaynak tarandı ama yeni ilan yok (görülen metin: ${this.scanSeenMessages}). ` +
+          `WhatsApp geçmişi vermediyse birkaç yeni mesaj gelsin veya bağlantıyı kesip tekrar bağlan. Dinleme açık.`,
       };
     }
 
     return {
       triggered,
-      storedHint: `${selectedGroupIds.length} kaynak tarandı (grup+kanal, max 15 gün) — ${added} yeni ilan eklendi. Dinleme açık, yeni gelenler otomatik alınır.`,
+      storedHint: `${selectedGroupIds.length} kaynak — ${added} ilan havuza eklendi` +
+        (restored ? ` (arşivden ${restored})` : "") +
+        `. Dinleme açık.`,
     };
   }
 
@@ -931,7 +1134,9 @@ class WhatsAppService {
       const content = normalizeListingContent(text);
       if (!content) continue;
 
-      // Only özel güvenlik job listings — skip normal chat
+      this.scanSeenMessages++;
+
+      // Only skip tiny greetings — keep everything else from selected sources
       if (!isPrivateSecurityJobListing(content)) {
         skippedNotListing++;
         continue;
@@ -1012,6 +1217,14 @@ class WhatsAppService {
         .insert(whatsappMessagesTable)
         .values(uniqueRows)
         .onConflictDoNothing();
+
+      await db
+        .insert(whatsappMessagesArchiveTable)
+        .values(uniqueRows)
+        .onConflictDoNothing();
+
+      this.scanStoredListings += uniqueRows.length;
+      await this.persistCursorsToDb();
 
       if (!isHistory) {
         this.lastFetchAt = new Date();
