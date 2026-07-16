@@ -38,11 +38,12 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 
-/** WhatsApp write time — day + clock (not fetch time) */
+/** WhatsApp send time — Istanbul clock (not fetch time) */
 function formatWrittenAt(isoString: string): string {
   try {
     const date = new Date(isoString);
     return new Intl.DateTimeFormat('tr-TR', {
+      timeZone: 'Europe/Istanbul',
       day: '2-digit',
       month: '2-digit',
       year: 'numeric',
@@ -271,10 +272,10 @@ export function MessagesTab() {
             <MessageSquare className="w-16 h-16 opacity-10 mb-6" />
             <p className="text-lg">Havuzda henüz mesaj bulunmuyor.</p>
             <p className="text-sm mt-2 opacity-70 max-w-md text-center">
-              Seçili grup/kanallardaki mesajlar toplanır (kısa sohbet hariç).
-              Sadece birebir aynı metin atlanır. Havuzu silince ilanlar arşive
-              gider; &quot;Yeniden Tara&quot; arşiv + WhatsApp geçmişini tekrar
-              yükler.
+              Seçili grup/kanallar taranır (max 15 gün geri). Havuzu sil →
+              Yeniden Tara ile derin tarama yapılır. Tarih = mesajın WhatsApp
+              gönderim zamanı (çekildiği an değil). Sadece birebir aynı metin
+              atlanır.
             </p>
             {debouncedSearch && (
               <p className="text-sm mt-2 opacity-70">
@@ -318,8 +319,8 @@ export function MessagesTab() {
                     <div className="flex flex-col items-start sm:items-end gap-1 shrink-0">
                       <div className="flex items-center gap-1.5 text-xs font-mono text-foreground bg-muted/60 px-2 py-1 rounded-md border border-border/50">
                         <Clock className="w-3.5 h-3.5 text-primary" />
-                        <span title="WhatsApp'ta yazıldığı tarih/saat">
-                          Yazılma: {formatWrittenAt(msg.timestamp)}
+                        <span title="WhatsApp'ta mesajın gerçek gönderilme zamanı">
+                          Gönderilme: {formatWrittenAt(msg.timestamp)}
                         </span>
                       </div>
                     </div>

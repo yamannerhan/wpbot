@@ -35,9 +35,46 @@ const baileysLogger = pino({ level: "error" });
 /** Periodic top-up while connected (live upserts still instant). */
 const LISTEN_INTERVAL_MS = 5 * 60 * 1000;
 const HISTORY_LOOKBACK_MS = 15 * 24 * 60 * 60 * 1000;
-const HISTORY_PAGE_SIZE = 80;
-const HISTORY_MAX_ROUNDS = 60;
-const HISTORY_BATCH_WAIT_MS = 12_000;
+const HISTORY_PAGE_SIZE = 100;
+const HISTORY_MAX_ROUNDS = 120;
+const HISTORY_BATCH_WAIT_MS = 15_000;
+
+/**
+ * Real WhatsApp send time (unix seconds). Handles number / bigint / Long.
+ * Returns 0 if unknown — never invent "now".
+ */
+function extractMsgUnixSeconds(msg: proto.IWebMessageInfo): number {
+  const raw = msg.messageTimestamp as unknown;
+  let n = 0;
+
+  if (typeof raw === "number") {
+    n = raw;
+  } else if (typeof raw === "bigint") {
+    n = Number(raw);
+  } else if (raw && typeof raw === "object") {
+    const o = raw as {
+      toNumber?: () => number;
+      low?: number;
+      high?: number;
+    };
+    if (typeof o.toNumber === "function") {
+      n = o.toNumber();
+    } else if (typeof o.low === "number") {
+      const low = o.low >>> 0;
+      const high = (o.high ?? 0) | 0;
+      n = high * 4294967296 + low;
+    } else {
+      n = Number(raw);
+    }
+  } else if (raw != null) {
+    n = Number(raw);
+  }
+
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  // ms → seconds
+  if (n > 1e12) return Math.floor(n / 1000);
+  return Math.floor(n);
+}
 
 export type WAState =
   | "disconnected"
@@ -93,6 +130,8 @@ class WhatsAppService {
   private scanSeenMessages = 0;
   private scanStoredListings = 0;
   private forcingHistoryResync = false;
+  /** Set by Havuzu Temizle — next Yeniden Tara does deep 15-day pull. */
+  private deepRescanPending = false;
 
   getStatus(): WAStatus {
     return { ...this.status };
@@ -662,11 +701,17 @@ class WhatsAppService {
             : new Date(row.timestamp as unknown as string)
           ).getTime() / 1000,
         );
+        const participant =
+          row.sender &&
+          (row.sender.includes("@") || row.sender.includes(":"))
+            ? row.sender
+            : undefined;
         this.rememberMsgKey(row.groupId, {
           key: {
             id: row.messageId,
             remoteJid: row.groupId,
             fromMe: false,
+            participant,
           },
           tsSeconds,
         });
@@ -675,14 +720,15 @@ class WhatsAppService {
     }
 
     await db.delete(whatsappMessagesTable);
-    logger.info({ deleted }, "Pool cleared — archived for rescan restore");
+    this.deepRescanPending = true;
+    logger.info({ deleted }, "Pool cleared — archived; deep 15-day rescan pending");
 
     return {
       deleted,
       message:
         deleted > 0
-          ? `Havuz temizlendi (${deleted} ilan arşive alındı). "Yeniden Tara" ile geri yüklenir + WhatsApp geçmişi çekilir.`
-          : "Havuz zaten boş.",
+          ? `Havuz temizlendi (${deleted} ilan arşive alındı). "Yeniden Tara" ile son 15 güne kadar geri çekilir.`
+          : "Havuz zaten boş. Yeniden Tara ile 15 güne kadar geri tarayın.",
     };
   }
 
@@ -757,8 +803,14 @@ class WhatsAppService {
             groupId,
             newestMessageId: newest?.key?.id ?? null,
             newestTs: newest?.tsSeconds ?? null,
+            newestParticipant: newest?.key?.participant
+              ? String(newest.key.participant)
+              : null,
             oldestMessageId: oldest?.key?.id ?? null,
             oldestTs: oldest?.tsSeconds ?? null,
+            oldestParticipant: oldest?.key?.participant
+              ? String(oldest.key.participant)
+              : null,
             updatedAt: new Date(),
           })
           .onConflictDoUpdate({
@@ -766,8 +818,14 @@ class WhatsAppService {
             set: {
               newestMessageId: newest?.key?.id ?? null,
               newestTs: newest?.tsSeconds ?? null,
+              newestParticipant: newest?.key?.participant
+                ? String(newest.key.participant)
+                : null,
               oldestMessageId: oldest?.key?.id ?? null,
               oldestTs: oldest?.tsSeconds ?? null,
+              oldestParticipant: oldest?.key?.participant
+                ? String(oldest.key.participant)
+                : null,
               updatedAt: new Date(),
             },
           });
@@ -793,6 +851,7 @@ class WhatsAppService {
             id: row.newestMessageId,
             remoteJid: jid,
             fromMe: false,
+            participant: row.newestParticipant || undefined,
           },
           tsSeconds: Number(row.newestTs),
         });
@@ -803,6 +862,7 @@ class WhatsAppService {
             id: row.oldestMessageId,
             remoteJid: jid,
             fromMe: false,
+            participant: row.oldestParticipant || undefined,
           },
           tsSeconds: Number(row.oldestTs),
         };
@@ -815,6 +875,7 @@ class WhatsAppService {
             id: row.newestMessageId,
             remoteJid: jid,
             fromMe: false,
+            participant: row.newestParticipant || undefined,
           },
           tsSeconds: Number(row.newestTs),
         };
@@ -854,10 +915,10 @@ class WhatsAppService {
   }
 
   /**
-   * Pull history for selected groups/channels:
-   * 1) Restore from archive (survives pool clear)
-   * 2) Paginate WhatsApp history (15-day cap)
-   * 3) If still empty, soft-reconnect once to force history sync
+   * Pull history for selected groups/channels (max 15 days):
+   * - After clear: deep resync (soft reconnect) then paginate every source
+   * - Always walk from newest → older until 15-day cap or WA stops
+   * - Timestamps stored = real WhatsApp send time
    */
   async fetchHistory(): Promise<{ triggered: number; storedHint: string }> {
     if (!this.sock || !this.status.connected) {
@@ -875,59 +936,108 @@ class WhatsAppService {
     this.scanSeenMessages = 0;
     this.scanStoredListings = 0;
     const beforeCount = await this.countPoolMessages();
+    const doDeep = this.deepRescanPending;
+    this.deepRescanPending = false;
+
+    // Clear+rescan: force WA history sync first so we get real past messages
+    if (doDeep && !this.forcingHistoryResync) {
+      this.forcingHistoryResync = true;
+      try {
+        logger.info("Deep rescan — soft reconnect for full history sync");
+        await this.connect(undefined, { source: "reconnect" });
+        const deadline = Date.now() + 30_000;
+        while (Date.now() < deadline && this.status.state !== "connected") {
+          await new Promise((r) => setTimeout(r, 400));
+        }
+        // Allow messaging-history.set batches to land
+        await new Promise((r) => setTimeout(r, 12_000));
+      } catch (err) {
+        logger.error({ err }, "Deep history reconnect failed");
+      } finally {
+        setTimeout(() => {
+          this.forcingHistoryResync = false;
+        }, 90_000);
+      }
+    }
+
+    if (!this.sock || !this.status.connected) {
+      throw new Error("Not connected to WhatsApp");
+    }
 
     const restored = await this.restorePoolFromArchive();
-    logger.info({ restored }, "Archive restore step done");
+    logger.info({ restored, doDeep }, "Archive restore step done");
 
     const fifteenDaysAgoSec = Math.floor(
       (Date.now() - HISTORY_LOOKBACK_MS) / 1000,
     );
     let triggered = 0;
+    let oldestReachedSec: number | null = null;
 
     for (const jid of selectedGroupIds) {
       try {
         await this.sock.presenceSubscribe(jid).catch(() => undefined);
 
+        // Seed cursor from memory / DB / persisted cursors
+        await this.resolveNewestMessageKeyFromDb(jid);
+        await this.loadCursorFromDb(jid);
+
+        // Always start from NEWEST, then walk older page by page
+        let anchor =
+          this.newestMsgKeyByJid.get(jid) ??
+          this.oldestMsgKeyByJid.get(jid) ??
+          null;
+
+        if (!anchor?.key?.id) {
+          logger.warn({ jid }, "No cursor for chat — skip until a live msg arrives");
+          continue;
+        }
+
         for (let round = 0; round < HISTORY_MAX_ROUNDS; round++) {
-          let cursor =
-            this.oldestMsgKeyByJid.get(jid) ??
-            this.newestMsgKeyByJid.get(jid) ??
-            (await this.resolveNewestMessageKeyFromDb(jid)) ??
-            (await this.loadCursorFromDb(jid));
-
-          if (!cursor?.key?.id) {
-            logger.warn(
-              { jid, round },
-              "No message key yet — will try soft resync if pool stays empty",
-            );
-            break;
-          }
-
-          if (cursor.tsSeconds <= fifteenDaysAgoSec) {
+          if (anchor.tsSeconds <= fifteenDaysAgoSec) {
             logger.info({ jid }, "Reached max 15-day lookback");
             break;
           }
 
           const prevOldestTs =
-            this.oldestMsgKeyByJid.get(jid)?.tsSeconds ?? cursor.tsSeconds;
+            this.oldestMsgKeyByJid.get(jid)?.tsSeconds ?? anchor.tsSeconds;
+
+          const ts =
+            anchor.tsSeconds > 1e12
+              ? Math.floor(anchor.tsSeconds / 1000)
+              : anchor.tsSeconds;
+
+          logger.info(
+            { jid, round, msgId: anchor.key.id, tsSeconds: ts },
+            "History page request (walking back)",
+          );
 
           await this.sock.fetchMessageHistory(
             HISTORY_PAGE_SIZE,
-            cursor.key,
-            cursor.tsSeconds > 1e12
-              ? Math.floor(cursor.tsSeconds / 1000)
-              : cursor.tsSeconds,
+            anchor.key,
+            ts,
           );
           triggered++;
 
           const gotBatch = await this.waitForHistoryBatch(HISTORY_BATCH_WAIT_MS);
-          await new Promise((r) => setTimeout(r, 400));
+          await new Promise((r) => setTimeout(r, 500));
 
           const nextOldest = this.oldestMsgKeyByJid.get(jid);
+          if (nextOldest) {
+            oldestReachedSec =
+              oldestReachedSec == null
+                ? nextOldest.tsSeconds
+                : Math.min(oldestReachedSec, nextOldest.tsSeconds);
+          }
+
           const advanced =
             nextOldest != null && nextOldest.tsSeconds < prevOldestTs;
 
           if (!advanced) {
+            // One retry if batch timed out
+            if (!gotBatch && round < HISTORY_MAX_ROUNDS - 1) {
+              await new Promise((r) => setTimeout(r, 800));
+              continue;
+            }
             logger.info(
               {
                 jid,
@@ -936,7 +1046,7 @@ class WhatsAppService {
                 prevOldestTs,
                 nextTs: nextOldest?.tsSeconds,
               },
-              "No older messages available — stopping lookback for group",
+              "No older messages — stop this chat",
             );
             break;
           }
@@ -945,6 +1055,9 @@ class WhatsAppService {
             logger.info({ jid }, "Reached max 15-day lookback");
             break;
           }
+
+          // Next page: continue from the oldest we just reached
+          anchor = nextOldest;
         }
       } catch (err) {
         logger.error({ err, jid }, "Failed to fetch history for group");
@@ -952,37 +1065,10 @@ class WhatsAppService {
     }
 
     await this.persistCursorsToDb();
-    await new Promise((r) => setTimeout(r, 2000));
+    await new Promise((r) => setTimeout(r, 2500));
 
-    let afterCount = await this.countPoolMessages();
-    let added = Math.max(0, afterCount - beforeCount);
-
-    // WhatsApp often won't re-send history after clear — force one soft reconnect
-    if (
-      added === 0 &&
-      restored === 0 &&
-      !this.forcingHistoryResync &&
-      this.status.connected
-    ) {
-      this.forcingHistoryResync = true;
-      try {
-        logger.info("Pool still empty — soft reconnect to force history sync");
-        await this.connect(undefined, { source: "reconnect" });
-        const deadline = Date.now() + 25_000;
-        while (Date.now() < deadline && this.status.state !== "connected") {
-          await new Promise((r) => setTimeout(r, 500));
-        }
-        await new Promise((r) => setTimeout(r, 8_000));
-        afterCount = await this.countPoolMessages();
-        added = Math.max(0, afterCount - beforeCount);
-      } catch (err) {
-        logger.error({ err }, "Soft history resync failed");
-      } finally {
-        setTimeout(() => {
-          this.forcingHistoryResync = false;
-        }, 60_000);
-      }
-    }
+    const afterCount = await this.countPoolMessages();
+    const added = Math.max(0, afterCount - beforeCount);
 
     this.lastFetchAt = new Date();
     this.nextFetchAt = new Date(Date.now() + LISTEN_INTERVAL_MS);
@@ -995,6 +1081,14 @@ class WhatsAppService {
         set: { lastFetchAt: this.lastFetchAt },
       });
 
+    const daysBack =
+      oldestReachedSec != null
+        ? Math.max(
+            0,
+            Math.round((Date.now() / 1000 - oldestReachedSec) / 86400),
+          )
+        : null;
+
     logger.info(
       {
         triggered,
@@ -1002,24 +1096,28 @@ class WhatsAppService {
         restored,
         seen: this.scanSeenMessages,
         groups: selectedGroupIds.length,
+        daysBack,
+        doDeep,
       },
-      "History sync finished — live listening remains active",
+      "History sync finished",
     );
 
     if (added === 0 && restored === 0) {
       return {
         triggered,
         storedHint:
-          `${selectedGroupIds.length} kaynak tarandı ama yeni ilan yok (görülen metin: ${this.scanSeenMessages}). ` +
-          `WhatsApp geçmişi vermediyse birkaç yeni mesaj gelsin veya bağlantıyı kesip tekrar bağlan. Dinleme açık.`,
+          `${selectedGroupIds.length} kaynak tarandı, yeni ilan yok (görülen: ${this.scanSeenMessages}). ` +
+          `Bir mesaj gelsin veya bağlantıyı yenileyip tekrar "Yeniden Tara".`,
       };
     }
 
     return {
       triggered,
-      storedHint: `${selectedGroupIds.length} kaynak — ${added} ilan havuza eklendi` +
-        (restored ? ` (arşivden ${restored})` : "") +
-        `. Dinleme açık.`,
+      storedHint:
+        `${selectedGroupIds.length} kaynak — ${added} ilan eklendi` +
+        (restored ? ` (arşiv ${restored})` : "") +
+        (daysBack != null ? ` · ~${daysBack} gün geriye gidildi` : "") +
+        ` · tarihler = WhatsApp gönderim zamanı.`,
     };
   }
 
@@ -1036,13 +1134,24 @@ class WhatsAppService {
 
       const latest = rows[0];
       if (latest?.messageId) {
+        const participant =
+          latest.sender &&
+          (latest.sender.includes("@") || latest.sender.includes(":"))
+            ? latest.sender
+            : undefined;
         const info: CachedMsgKey = {
           key: {
             id: latest.messageId,
             remoteJid: jid,
             fromMe: false,
+            participant,
           },
-          tsSeconds: Math.floor(latest.timestamp.getTime() / 1000),
+          tsSeconds: Math.floor(
+            (latest.timestamp instanceof Date
+              ? latest.timestamp
+              : new Date(latest.timestamp as unknown as string)
+            ).getTime() / 1000,
+          ),
         };
         this.rememberMsgKey(jid, info);
         return info;
@@ -1078,9 +1187,8 @@ class WhatsAppService {
         jid.endsWith("@newsletter") || Boolean(alt?.endsWith("@newsletter"));
       if (!isGroup && !isChannel) continue;
 
-      let ts = Number(msg.messageTimestamp ?? 0);
-      if (ts > 1e12) ts = Math.floor(ts / 1000);
-      if (!ts) ts = Math.floor(Date.now() / 1000);
+      const ts = extractMsgUnixSeconds(msg);
+      if (!ts) continue; // never invent "now" for cursors
 
       const info: CachedMsgKey = { key: msg.key, tsSeconds: ts };
       this.rememberMsgKey(jid, info);
@@ -1096,7 +1204,9 @@ class WhatsAppService {
     if (selectedGroupIds.length === 0) return;
 
     const selectedSet = new Set(selectedGroupIds);
-    const fifteenDaysAgo = new Date(Date.now() - HISTORY_LOOKBACK_MS);
+    const fifteenDaysAgoSec = Math.floor(
+      (Date.now() - HISTORY_LOOKBACK_MS) / 1000,
+    );
 
     const toInsert: Array<{
       messageId: string;
@@ -1111,6 +1221,7 @@ class WhatsAppService {
     const batchContents = new Set<string>();
     let skippedNotListing = 0;
     let skippedExactDup = 0;
+    let skippedNoTs = 0;
 
     for (const msg of messages) {
       if (!msg.key?.remoteJid || !msg.key?.id) continue;
@@ -1149,19 +1260,23 @@ class WhatsAppService {
       }
       batchContents.add(content);
 
-      let tsSeconds = Number(msg.messageTimestamp ?? 0);
-      if (tsSeconds > 1e12) tsSeconds = Math.floor(tsSeconds / 1000);
-      const msgDate = tsSeconds ? new Date(tsSeconds * 1000) : new Date();
+      // REAL WhatsApp send time — never use fetch/now for history
+      const tsSeconds = extractMsgUnixSeconds(msg);
+      if (!tsSeconds) {
+        skippedNoTs++;
+        continue;
+      }
+      if (isHistory && tsSeconds < fifteenDaysAgoSec) continue;
 
-      // History lookback capped at 15 days. Live messages always accepted.
-      if (isHistory && tsSeconds && msgDate < fifteenDaysAgo) continue;
+      const msgDate = new Date(tsSeconds * 1000);
 
+      const participant =
+        (msg as { participant?: string }).participant ??
+        msg.key.participant ??
+        null;
       const sender = msg.key.fromMe
         ? (this.status.phone ?? "me")
-        : ((msg as { participant?: string }).participant ??
-          msg.key.participant ??
-          msg.pushName ??
-          "unknown");
+        : (participant ?? msg.pushName ?? "unknown");
 
       const groupName = await this.getGroupName(matchedJid);
 
@@ -1176,9 +1291,9 @@ class WhatsAppService {
     }
 
     if (toInsert.length === 0) {
-      if (skippedNotListing > 0 || skippedExactDup > 0) {
+      if (skippedNotListing > 0 || skippedExactDup > 0 || skippedNoTs > 0) {
         logger.info(
-          { skippedNotListing, skippedExactDup, isHistory },
+          { skippedNotListing, skippedExactDup, skippedNoTs, isHistory },
           "No new listings to store after filters",
         );
       }

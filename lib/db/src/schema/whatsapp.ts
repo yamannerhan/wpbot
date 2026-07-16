@@ -42,8 +42,10 @@ export const whatsappChatCursorsTable = pgTable("whatsapp_chat_cursors", {
   groupId: text("group_id").primaryKey(),
   newestMessageId: text("newest_message_id"),
   newestTs: bigint("newest_ts", { mode: "number" }),
+  newestParticipant: text("newest_participant"),
   oldestMessageId: text("oldest_message_id"),
   oldestTs: bigint("oldest_ts", { mode: "number" }),
+  oldestParticipant: text("oldest_participant"),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 });
 
