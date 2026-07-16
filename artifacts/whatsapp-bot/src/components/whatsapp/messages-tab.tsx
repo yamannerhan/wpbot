@@ -271,8 +271,9 @@ export function MessagesTab() {
             <MessageSquare className="w-16 h-16 opacity-10 mb-6" />
             <p className="text-lg">Havuzda henüz mesaj bulunmuyor.</p>
             <p className="text-sm mt-2 opacity-70 max-w-md text-center">
-              Grup seçip &quot;Yeniden Tara (15 gün)&quot; ile geçmişi çekin. Yeni mesajlar
-              otomatik düşer.
+              Sadece özel güvenlik iş ilanları toplanır (maaş / numara / alım
+              içerenler). Normal sohbet mesajları alınmaz. Grup seçip &quot;Yeniden
+              Tara&quot; ile geçmişi çekin.
             </p>
             {debouncedSearch && (
               <p className="text-sm mt-2 opacity-70">

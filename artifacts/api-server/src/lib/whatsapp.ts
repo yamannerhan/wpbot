@@ -17,6 +17,7 @@ import { db } from "@workspace/db";
 import { whatsappMessagesTable, whatsappConfigTable } from "@workspace/db";
 import { eq, desc, asc, inArray, sql } from "drizzle-orm";
 import pino from "pino";
+import { isPrivateSecurityJobListing } from "./listing-filter.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const AUTH_SUFFIX = process.env.NODE_ENV === "development" ? "-dev" : "";
@@ -803,7 +804,10 @@ class WhatsAppService {
       const content = normalizeListingContent(text);
       if (!content) continue;
 
-      // Identical listing content → skip (pool-wide uniqueness)
+      // Only özel güvenlik job listings — skip normal chat
+      if (!isPrivateSecurityJobListing(content)) continue;
+
+      // Exact same content only → duplicate (pool-wide)
       if (batchContents.has(content)) continue;
       batchContents.add(content);
 
