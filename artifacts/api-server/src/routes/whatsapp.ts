@@ -171,18 +171,17 @@ router.get("/whatsapp/messages", async (req, res): Promise<void> => {
   });
 });
 
-// DELETE /whatsapp/messages — factory reset: wipe pool + rescan up to 15 days
+// DELETE /whatsapp/messages — only wipe the pool (no auto-rescan)
 router.delete("/whatsapp/messages", async (req, res): Promise<void> => {
   try {
-    const result = await whatsappService.clearPoolAndRescan();
+    const result = await whatsappService.clearPoolOnly();
     res.json({
       deleted: result.deleted,
-      restored: result.restored,
       message: result.message,
     });
   } catch (err) {
-    req.log.error({ err }, "Failed to reset message pool");
-    res.status(500).json({ error: "Failed to reset message pool" });
+    req.log.error({ err }, "Failed to clear message pool");
+    res.status(500).json({ error: "Failed to clear message pool" });
   }
 });
 

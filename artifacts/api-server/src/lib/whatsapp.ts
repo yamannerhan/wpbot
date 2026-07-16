@@ -487,20 +487,14 @@ class WhatsAppService {
   }
 
   /**
-   * Factory reset for the message pool:
-   * - Wipe + immediately put last-15-day listings back (same content allowed)
-   * - Then scan WhatsApp history in background (must not block HTTP — avoids timeout → empty pool)
+   * Wipe message pool only. Does NOT rescan — use fetchHistory separately.
+   * After clear, the same listings can be collected again (content dedupe is empty).
    */
-  async clearPoolAndRescan(): Promise<{
-    deleted: number;
-    restored: number;
-    message: string;
-  }> {
+  async clearPoolOnly(): Promise<{ deleted: number; message: string }> {
     const snapshot = await db.select().from(whatsappMessagesTable);
     const deleted = snapshot.length;
-    const selected = await this.getSelectedGroupIds();
 
-    // Preserve newest key per group BEFORE wipe (needed for WA history pagination)
+    // Keep newest keys so "Geçmiş Tara" still works after wipe
     const newestByGroup = new Map<string, (typeof snapshot)[number]>();
     for (const row of snapshot) {
       const prev = newestByGroup.get(row.groupId);
@@ -515,76 +509,24 @@ class WhatsAppService {
           remoteJid: jid,
           fromMe: false,
         },
-        tsSeconds: Math.floor(row.timestamp.getTime() / 1000),
+        tsSeconds: Math.floor(
+          (row.timestamp instanceof Date
+            ? row.timestamp
+            : new Date(row.timestamp as unknown as string)
+          ).getTime() / 1000,
+        ),
       });
     }
 
     await db.delete(whatsappMessagesTable);
-    logger.info({ deleted }, "Pool wiped — factory reset");
-
-    // CRITICAL: restore immediately (before any long WA sync) so pool never stays at 0.
-    // Put ALL cleared listings back — same content is allowed after factory reset.
-    const rows = snapshot.map((row) => {
-      const ts =
-        row.timestamp instanceof Date
-          ? row.timestamp
-          : new Date(row.timestamp as unknown as string);
-      return {
-        messageId: row.messageId,
-        groupId: row.groupId,
-        groupName: row.groupName,
-        content: normalizeListingContent(row.content),
-        sender: row.sender,
-        timestamp: ts,
-        fetchedAt: new Date(),
-      };
-    });
-
-    let restored = 0;
-    const chunkSize = 200;
-    for (let i = 0; i < rows.length; i += chunkSize) {
-      const chunk = rows.slice(i, i + chunkSize);
-      if (chunk.length === 0) continue;
-      await db.insert(whatsappMessagesTable).values(chunk).onConflictDoNothing();
-      restored += chunk.length;
-    }
-
-    // Refresh keys from restored rows
-    for (const [jid, row] of newestByGroup) {
-      this.lastMsgKeyByJid.set(jid, {
-        key: { id: row.messageId, remoteJid: jid, fromMe: false },
-        tsSeconds: Math.floor(row.timestamp.getTime() / 1000),
-      });
-    }
-
-    const afterRestore = await this.countPoolMessages();
-
-    // Long WA history pull in background — never block/clear response
-    if (this.status.connected && selected.length > 0) {
-      setTimeout(() => {
-        this.fetchHistory()
-          .then((hist) =>
-            logger.info({ hist }, "Background 15-day rescan after clear finished"),
-          )
-          .catch((err) =>
-            logger.error({ err }, "Background 15-day rescan after clear failed"),
-          );
-      }, 300);
-    }
-
-    let hint = "";
-    if (!this.status.connected) {
-      hint = " WhatsApp bağlı değil — bağlanıp tekrar sıfırla.";
-    } else if (selected.length === 0) {
-      hint = " Grup seç — sonra 15 gün tarama çalışır.";
-    } else {
-      hint = " 15 günlük tarama arka planda devam ediyor; birkaç saniye sonra yenile.";
-    }
+    logger.info({ deleted }, "Pool cleared (no auto-rescan)");
 
     return {
       deleted,
-      restored,
-      message: `Havuz sıfırlandı: ${deleted} silindi, ${afterRestore} ilan geri yüklendi (aynı içerik serbest).${hint}`,
+      message:
+        deleted > 0
+          ? `Havuz temizlendi (${deleted} ilan silindi). Yeniden tarama için "Geçmiş Tara"ya bas.`
+          : "Havuz zaten boş.",
     };
   }
 
