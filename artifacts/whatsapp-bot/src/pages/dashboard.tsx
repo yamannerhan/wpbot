@@ -11,7 +11,7 @@ export default function Dashboard() {
       queryKey: getGetWhatsappStatusQueryKey(),
       refetchInterval: (query) => {
         const state = (query.state.data as any)?.state;
-        return (state === 'connecting' || state === 'qr_ready') ? 2000 : (state === 'connected' ? 10000 : false);
+        return (state === 'connecting' || state === 'qr_ready' || state === 'pairing_code_ready') ? 2000 : (state === 'connected' ? 10000 : false);
       }
     }
   });
