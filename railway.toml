@@ -1,5 +1,6 @@
 [build]
 builder = "NIXPACKS"
+# Deploy trigger: 2026-07-16
 buildCommand = "pnpm run build:prod"
 
 [deploy]
