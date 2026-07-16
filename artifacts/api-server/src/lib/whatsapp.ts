@@ -2,6 +2,7 @@ import makeWASocket, {
   DisconnectReason,
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
+  Browsers,
   type proto,
   type WASocket,
   type WAMessageKey,
@@ -10,6 +11,7 @@ import { Boom } from "@hapi/boom";
 import { toDataURL } from "qrcode";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import fs from "node:fs/promises";
 import { logger } from "./logger.js";
 import { db } from "@workspace/db";
 import { whatsappMessagesTable, whatsappConfigTable } from "@workspace/db";
@@ -48,6 +50,7 @@ interface GroupInfo {
 }
 
 type CachedMsgKey = { key: WAMessageKey; tsSeconds: number };
+type ConnectSource = "user" | "auto" | "reconnect";
 
 class WhatsAppService {
   private sock: WASocket | null = null;
@@ -62,10 +65,12 @@ class WhatsAppService {
   private listeningInterval: NodeJS.Timeout | null = null;
   private lastFetchAt: Date | null = null;
   private nextFetchAt: Date | null = null;
-  /** Last seen message key per chat — required for on-demand history */
   private lastMsgKeyByJid = new Map<string, CachedMsgKey>();
   private groupNameCache = new Map<string, string>();
   private connecting = false;
+  private pendingPhone: string | undefined;
+  private pairingRequested = false;
+  private reconnectTimer: NodeJS.Timeout | null = null;
 
   getStatus(): WAStatus {
     return { ...this.status };
@@ -83,18 +88,62 @@ class WhatsAppService {
     return this.nextFetchAt;
   }
 
-  async connect(phoneNumber?: string): Promise<WAStatus> {
-    if (this.status.state === "connected") {
-      return this.getStatus();
+  private async softEnd(): Promise<void> {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
     }
-    if (this.status.state === "pairing_code_ready") {
-      return this.getStatus();
+    const sock = this.sock;
+    this.sock = null;
+    if (sock) {
+      try {
+        sock.ev.removeAllListeners("connection.update");
+        sock.ev.removeAllListeners("creds.update");
+        sock.ev.removeAllListeners("messages.upsert");
+        sock.ev.removeAllListeners("messaging-history.set");
+        sock.end(undefined);
+      } catch {
+        /* ignore */
+      }
     }
-    if (this.connecting) {
-      return this.getStatus();
-    }
-    this.connecting = true;
+    this.connecting = false;
+  }
 
+  private async clearAuthDir(): Promise<void> {
+    try {
+      await fs.rm(AUTH_DIR, { recursive: true, force: true });
+      await fs.mkdir(AUTH_DIR, { recursive: true });
+      logger.info({ AUTH_DIR }, "Auth session cleared for fresh login");
+    } catch (err) {
+      logger.error({ err }, "Failed to clear auth dir");
+    }
+  }
+
+  async connect(
+    phoneNumber?: string,
+    options?: { source?: ConnectSource },
+  ): Promise<WAStatus> {
+    const source: ConnectSource = options?.source ?? "user";
+
+    if (this.status.state === "connected" && source !== "reconnect") {
+      return this.getStatus();
+    }
+
+    await this.softEnd();
+    this.stopListening();
+
+    if (source === "user") {
+      // Wipe partial/broken session so QR or pairing code always appears
+      await this.clearAuthDir();
+      this.pendingPhone = phoneNumber?.replace(/\D/g, "") || undefined;
+    } else if (source === "auto") {
+      this.pendingPhone = undefined;
+    } else if (phoneNumber) {
+      this.pendingPhone = phoneNumber.replace(/\D/g, "");
+    }
+
+    this.pairingRequested = false;
+    this.connecting = true;
     this.status = {
       connected: false,
       state: "connecting",
@@ -104,18 +153,18 @@ class WhatsAppService {
       pushName: null,
     };
 
-    const normalizedPhone = phoneNumber?.replace(/\D/g, "") || undefined;
-
     try {
+      await fs.mkdir(AUTH_DIR, { recursive: true });
       const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
       const { version } = await fetchLatestBaileysVersion();
 
+      // Ubuntu/Chrome required — custom browser names make WhatsApp reject pairing codes
       this.sock = makeWASocket({
         version,
         logger: baileysLogger,
         printQRInTerminal: false,
         auth: state,
-        browser: ["Ilan Toplayici Bot", "Chrome", "120.0.0"],
+        browser: Browsers.ubuntu("Chrome"),
         syncFullHistory: true,
         shouldSyncHistoryMessage: () => true,
         markOnlineOnConnect: false,
@@ -128,41 +177,58 @@ class WhatsAppService {
         const { connection, lastDisconnect, qr } = update;
 
         if (qr) {
-          if (normalizedPhone && this.sock) {
+          const wantPairing =
+            Boolean(this.pendingPhone) &&
+            !this.pairingRequested &&
+            !this.sock?.authState?.creds?.registered;
+
+          if (wantPairing && this.sock && this.pendingPhone) {
+            this.pairingRequested = true;
             try {
-              const code = await this.sock.requestPairingCode(normalizedPhone);
+              await new Promise((r) => setTimeout(r, 1500));
+              if (!this.sock) return;
+
+              const code = await this.sock.requestPairingCode(this.pendingPhone);
+              const raw = String(code).replace(/\D/g, "");
               const formatted =
-                code.length === 8
-                  ? `${code.slice(0, 4)}-${code.slice(4)}`
-                  : code;
+                raw.length === 8
+                  ? `${raw.slice(0, 4)}-${raw.slice(4)}`
+                  : String(code);
+
               this.status = {
                 ...this.status,
                 state: "pairing_code_ready",
                 pairingCode: formatted,
                 qrCode: null,
               };
+              this.connecting = false;
               logger.info({ code: formatted }, "Pairing code generated");
             } catch (err) {
-              logger.error({ err }, "Failed to request pairing code");
+              logger.error({ err }, "Pairing code failed — falling back to QR");
+              this.pendingPhone = undefined;
               try {
-                const qrDataUrl = await toDataURL(qr, { width: 256, margin: 2 });
+                const qrDataUrl = await toDataURL(qr, { width: 280, margin: 2 });
                 this.status = {
                   ...this.status,
                   state: "qr_ready",
                   qrCode: qrDataUrl,
+                  pairingCode: null,
                 };
-              } catch {
-                /* ignore */
+                this.connecting = false;
+              } catch (qrErr) {
+                logger.error({ qrErr }, "QR generation also failed");
               }
             }
-          } else {
+          } else if (!this.pendingPhone) {
             try {
-              const qrDataUrl = await toDataURL(qr, { width: 256, margin: 2 });
+              const qrDataUrl = await toDataURL(qr, { width: 280, margin: 2 });
               this.status = {
                 ...this.status,
                 state: "qr_ready",
                 qrCode: qrDataUrl,
+                pairingCode: null,
               };
+              this.connecting = false;
               logger.info("QR code ready to scan");
             } catch (err) {
               logger.error({ err }, "Failed to generate QR code");
@@ -173,10 +239,18 @@ class WhatsAppService {
         if (connection === "close") {
           this.connecting = false;
           const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
+          const isLoggedOut = statusCode === DisconnectReason.loggedOut;
           const isReplaced = statusCode === 440;
-          const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+          const isRestart =
+            statusCode === DisconnectReason.restartRequired ||
+            statusCode === 515;
 
-          logger.info({ statusCode, shouldReconnect, isReplaced }, "Connection closed");
+          logger.info(
+            { statusCode, isRestart, isLoggedOut, isReplaced },
+            "Connection closed",
+          );
+
+          const wasConnected = this.status.state === "connected";
 
           this.status = {
             connected: false,
@@ -189,18 +263,25 @@ class WhatsAppService {
           this.sock = null;
           this.stopListening();
 
-          if (shouldReconnect && !isReplaced) {
-            logger.info("Reconnecting in 3 seconds...");
-            setTimeout(() => this.connect(), 3000);
+          // After QR/code scan WA sends restartRequired — reconnect SAME auth (do not clear)
+          if (
+            !isLoggedOut &&
+            !isReplaced &&
+            (isRestart || wasConnected)
+          ) {
+            logger.info("Reconnecting with saved session...");
+            this.reconnectTimer = setTimeout(() => {
+              this.connect(this.pendingPhone, { source: "reconnect" });
+            }, 1500);
           } else if (isReplaced) {
-            logger.warn(
-              "Session replaced by another instance — staying disconnected.",
-            );
+            logger.warn("Session replaced — staying disconnected.");
           }
         }
 
         if (connection === "open") {
           this.connecting = false;
+          this.pendingPhone = undefined;
+          this.pairingRequested = false;
           const user = this.sock?.user;
           this.status = {
             connected: true,
@@ -213,7 +294,6 @@ class WhatsAppService {
           logger.info({ phone: this.status.phone }, "WhatsApp connected");
           this.startListening();
 
-          // After connect, try a delayed history pull for selected groups
           setTimeout(() => {
             this.fetchHistory().catch((err) =>
               logger.error({ err }, "Auto history fetch failed"),
@@ -222,7 +302,6 @@ class WhatsAppService {
         }
       });
 
-      // notify = live, append/prepend = history chunks
       this.sock.ev.on("messages.upsert", async ({ messages, type }) => {
         this.cacheMessageKeys(messages);
         if (type === "notify" || type === "append" || type === "prepend") {
@@ -262,15 +341,27 @@ class WhatsAppService {
   async disconnect(): Promise<WAStatus> {
     this.stopListening();
     this.connecting = false;
+    this.pendingPhone = undefined;
+    this.pairingRequested = false;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
 
     if (this.sock) {
       try {
         await this.sock.logout();
       } catch {
-        this.sock.end(undefined);
+        try {
+          this.sock.end(undefined);
+        } catch {
+          /* ignore */
+        }
       }
       this.sock = null;
     }
+
+    await this.clearAuthDir();
 
     this.status = {
       connected: false,
@@ -281,6 +372,25 @@ class WhatsAppService {
       pushName: null,
     };
 
+    return this.getStatus();
+  }
+
+  async cancelLogin(): Promise<WAStatus> {
+    if (this.status.state === "connected") {
+      return this.getStatus();
+    }
+    await this.softEnd();
+    this.pendingPhone = undefined;
+    this.pairingRequested = false;
+    await this.clearAuthDir();
+    this.status = {
+      connected: false,
+      state: "disconnected",
+      qrCode: null,
+      pairingCode: null,
+      phone: null,
+      pushName: null,
+    };
     return this.getStatus();
   }
 
@@ -331,13 +441,12 @@ class WhatsAppService {
 
   async autoConnect(): Promise<void> {
     try {
-      const fs = await import("node:fs/promises");
       const credsPath = path.join(AUTH_DIR, "creds.json");
       const raw = await fs.readFile(credsPath, "utf8");
       const creds = JSON.parse(raw);
       if (creds?.me?.id) {
         logger.info("Saved WhatsApp session found — reconnecting automatically");
-        await this.connect();
+        await this.connect(undefined, { source: "auto" });
       }
     } catch {
       /* first run */

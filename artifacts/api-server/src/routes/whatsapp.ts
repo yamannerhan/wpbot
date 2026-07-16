@@ -31,6 +31,12 @@ router.post("/whatsapp/disconnect", async (req, res): Promise<void> => {
   res.json(status);
 });
 
+// POST /whatsapp/cancel — cancel QR/code wait
+router.post("/whatsapp/cancel", async (_req, res): Promise<void> => {
+  const status = await whatsappService.cancelLogin();
+  res.json(status);
+});
+
 // GET /whatsapp/groups
 router.get("/whatsapp/groups", async (req, res): Promise<void> => {
   const status = whatsappService.getStatus();

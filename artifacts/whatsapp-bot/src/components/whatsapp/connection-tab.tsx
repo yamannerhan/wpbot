@@ -16,6 +16,7 @@ export function ConnectionTab({ status }: { status?: WhatsAppStatus }) {
   const [mode, setMode] = useState<LoginMode>('qr');
   const [phone, setPhone] = useState('90');
   const [copied, setCopied] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
 
   const refreshStatus = () => {
     queryClient.invalidateQueries({ queryKey: getGetWhatsappStatusQueryKey() });
@@ -23,7 +24,7 @@ export function ConnectionTab({ status }: { status?: WhatsAppStatus }) {
 
   const handleQrConnect = () => {
     connect.mutate(
-      {},
+      { data: {} },
       {
         onSuccess: () => {
           refreshStatus();
@@ -36,8 +37,12 @@ export function ConnectionTab({ status }: { status?: WhatsAppStatus }) {
 
   const handleCodeConnect = () => {
     const digits = phone.replace(/\D/g, '');
-    if (digits.length < 10 || digits.length > 15) {
+    if (digits.length < 11 || digits.length > 15) {
       toast.error('Ülke kodu ile numarayı girin (örn. 905321234567)');
+      return;
+    }
+    if (!digits.startsWith('90') && digits.length === 10) {
+      toast.error('Başına 90 ekleyin (örn. 905321234567)');
       return;
     }
     connect.mutate(
@@ -50,6 +55,19 @@ export function ConnectionTab({ status }: { status?: WhatsAppStatus }) {
         onError: () => toast.error('Kod oluşturulamadı'),
       },
     );
+  };
+
+  const handleCancel = async () => {
+    setCancelling(true);
+    try {
+      await fetch('/api/whatsapp/cancel', { method: 'POST' });
+      refreshStatus();
+      toast.info('İptal edildi');
+    } catch {
+      toast.error('İptal edilemedi');
+    } finally {
+      setCancelling(false);
+    }
   };
 
   const handleDisconnect = () => {
@@ -86,6 +104,10 @@ export function ConnectionTab({ status }: { status?: WhatsAppStatus }) {
   }
 
   const isIdle = status.state === 'disconnected' || !status.state;
+  const isBusy =
+    status.state === 'connecting' ||
+    status.state === 'qr_ready' ||
+    status.state === 'pairing_code_ready';
 
   return (
     <div className="max-w-md mx-auto mt-12 animate-in fade-in zoom-in-95 duration-300">
@@ -141,7 +163,7 @@ export function ConnectionTab({ status }: { status?: WhatsAppStatus }) {
                     onClick={handleQrConnect}
                     disabled={connect.isPending}
                     size="lg"
-                    className="w-full font-medium shadow-lg hover:shadow-primary/20 transition-all text-primary-foreground bg-primary hover:bg-primary/90"
+                    className="w-full font-medium shadow-lg text-primary-foreground bg-primary hover:bg-primary/90"
                   >
                     {connect.isPending ? (
                       <Loader2 className="mr-2 h-5 w-5 animate-spin" />
@@ -154,7 +176,7 @@ export function ConnectionTab({ status }: { status?: WhatsAppStatus }) {
               ) : (
                 <>
                   <p className="text-center text-sm text-muted-foreground max-w-[300px]">
-                    Ülke kodu + numara girin. WhatsApp size 8 haneli kod verecek; telefonda girin.
+                    Numaranızı ülke koduyla yazın. Çıkan 8 haneli kodu telefona girin.
                   </p>
                   <div className="w-full space-y-2">
                     <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
@@ -168,14 +190,14 @@ export function ConnectionTab({ status }: { status?: WhatsAppStatus }) {
                       className="font-mono text-center text-lg tracking-wide bg-background"
                     />
                     <p className="text-xs text-muted-foreground text-center">
-                      Örnek: 905321234567 (başına 0 koymayın)
+                      Örnek: 905321234567 — başta 0 olmasın
                     </p>
                   </div>
                   <Button
                     onClick={handleCodeConnect}
                     disabled={connect.isPending}
                     size="lg"
-                    className="w-full font-medium shadow-lg hover:shadow-primary/20 transition-all text-primary-foreground bg-primary hover:bg-primary/90"
+                    className="w-full font-medium shadow-lg text-primary-foreground bg-primary hover:bg-primary/90"
                   >
                     {connect.isPending ? (
                       <Loader2 className="mr-2 h-5 w-5 animate-spin" />
@@ -198,12 +220,16 @@ export function ConnectionTab({ status }: { status?: WhatsAppStatus }) {
               <p className="text-center font-medium animate-pulse text-primary tracking-wide">
                 Bağlanıyor...
               </p>
+              <Button variant="outline" onClick={handleCancel} disabled={cancelling} className="w-full">
+                {cancelling && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                İptal
+              </Button>
             </div>
           )}
 
           {status.state === 'qr_ready' && status.qrCode && (
             <div className="flex flex-col items-center space-y-6 w-full animate-in fade-in slide-in-from-bottom-4">
-              <div className="p-3 bg-white rounded-xl shadow-xl border-4 border-muted relative group">
+              <div className="p-3 bg-white rounded-xl shadow-xl border-4 border-muted">
                 <img src={status.qrCode} alt="WhatsApp QR Code" className="w-56 h-56 object-contain" />
               </div>
               <div className="bg-muted/40 p-4 rounded-lg w-full text-left border border-border/50">
@@ -213,7 +239,18 @@ export function ConnectionTab({ status }: { status?: WhatsAppStatus }) {
                   <li>QR Kodu taratın</li>
                 </ol>
               </div>
-              <Button variant="outline" onClick={handleDisconnect} className="w-full text-sm">
+              <Button variant="outline" onClick={handleCancel} disabled={cancelling} className="w-full text-sm">
+                {cancelling && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                İptal
+              </Button>
+            </div>
+          )}
+
+          {status.state === 'qr_ready' && !status.qrCode && (
+            <div className="flex flex-col items-center space-y-4 w-full">
+              <Loader2 className="w-8 h-8 animate-spin text-primary" />
+              <p className="text-sm text-muted-foreground">QR hazırlanıyor…</p>
+              <Button variant="outline" onClick={handleCancel} disabled={cancelling} className="w-full">
                 İptal
               </Button>
             </div>
@@ -240,16 +277,19 @@ export function ConnectionTab({ status }: { status?: WhatsAppStatus }) {
                     {copied ? <Check className="w-4 h-4 text-primary" /> : <Copy className="w-4 h-4" />}
                   </span>
                 </button>
+                <p className="text-xs text-amber-500">Kod ~1 dk geçerli — hemen girin</p>
               </div>
               <div className="bg-muted/40 p-4 rounded-lg w-full text-left border border-border/50">
                 <ol className="text-sm text-muted-foreground space-y-2 list-decimal list-inside font-medium">
-                  <li>Telefonda WhatsApp → <strong>Bağlı Cihazlar</strong></li>
-                  <li><strong>Cihaz bağla</strong> → <strong>Bunun yerine telefon numarası kullan</strong></li>
-                  <li>Yukarıdaki kodu girin</li>
+                  <li>WhatsApp → <strong>Bağlı Cihazlar</strong></li>
+                  <li><strong>Cihaz bağla</strong></li>
+                  <li><strong>Telefon numarası ile bağla</strong></li>
+                  <li>Yukarıdaki kodu girin (tire ile veya tiresiz)</li>
                 </ol>
               </div>
-              <Button variant="outline" onClick={handleDisconnect} className="w-full text-sm">
-                İptal
+              <Button variant="outline" onClick={handleCancel} disabled={cancelling} className="w-full text-sm">
+                {cancelling && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                İptal / Yeniden Dene
               </Button>
             </div>
           )}
@@ -258,8 +298,8 @@ export function ConnectionTab({ status }: { status?: WhatsAppStatus }) {
             <div className="flex flex-col items-center space-y-6 w-full animate-in fade-in slide-in-from-bottom-4">
               <div className="relative">
                 <div className="absolute inset-0 bg-primary/20 rounded-full blur-xl" />
-                <div className="w-24 h-24 rounded-full bg-card border border-primary/30 flex items-center justify-center relative z-10 shadow-[0_0_20px_rgba(37,211,102,0.1)]">
-                  <Smartphone className="w-10 h-10 text-primary drop-shadow-[0_0_8px_rgba(37,211,102,0.5)]" />
+                <div className="w-24 h-24 rounded-full bg-card border border-primary/30 flex items-center justify-center relative z-10">
+                  <Smartphone className="w-10 h-10 text-primary" />
                 </div>
               </div>
 
@@ -281,6 +321,10 @@ export function ConnectionTab({ status }: { status?: WhatsAppStatus }) {
                 Bağlantıyı Kes
               </Button>
             </div>
+          )}
+
+          {isBusy && (
+            <p className="sr-only">login-in-progress</p>
           )}
 
         </CardContent>
