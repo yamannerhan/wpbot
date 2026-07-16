@@ -78,12 +78,20 @@ export function MessagesTab() {
 
   const handleClearPool = () => {
     clearPool.mutate(undefined, {
-      onSuccess: () => {
-        toast.success("Mesaj havuzu temizlendi.");
-        queryClient.invalidateQueries({ queryKey: getGetMessageStatsQueryKey() });
-        queryClient.invalidateQueries({ queryKey: getGetMessagesQueryKey() });
+      onSuccess: (data) => {
+        const msg =
+          (data as { message?: string })?.message ||
+          "Havuz sıfırlandı — 15 gün yeniden taranıyor.";
+        toast.success(msg);
+        const refresh = () => {
+          queryClient.invalidateQueries({ queryKey: getGetMessageStatsQueryKey() });
+          queryClient.invalidateQueries({ queryKey: getGetMessagesQueryKey() });
+        };
+        refresh();
+        setTimeout(refresh, 3000);
+        setTimeout(refresh, 8000);
       },
-      onError: () => toast.error("Havuz temizlenemedi.")
+      onError: () => toast.error("Havuz sıfırlanamadı."),
     });
   };
 
@@ -178,20 +186,20 @@ export function MessagesTab() {
             <AlertDialogTrigger asChild>
               <Button variant="destructive" className="gap-2 whitespace-nowrap bg-destructive/90 hover:bg-destructive text-destructive-foreground">
                 <Trash2 className="w-4 h-4" />
-                Havuzu Temizle
+                Sıfırla + 15 Gün Tara
               </Button>
             </AlertDialogTrigger>
             <AlertDialogContent className="bg-card border-border">
               <AlertDialogHeader>
-                <AlertDialogTitle className="text-xl">Emin misiniz?</AlertDialogTitle>
+                <AlertDialogTitle className="text-xl">Havuzu sıfırla?</AlertDialogTitle>
                 <AlertDialogDescription className="text-muted-foreground text-base">
-                  Havuzdaki tüm mesajlar kalıcı olarak silinecek. Bu işlem geri alınamaz.
+                  Havuz temizlenir ve son 15 gün yeniden taranır. Aynı içerikli ilanlar tekrar havuza alınabilir (fabrika sıfırlaması).
                 </AlertDialogDescription>
               </AlertDialogHeader>
               <AlertDialogFooter className="mt-4">
                 <AlertDialogCancel className="bg-background">İptal</AlertDialogCancel>
                 <AlertDialogAction onClick={handleClearPool} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">
-                  Evet, Havuzu Temizle
+                  Evet, Sıfırla ve Tara
                 </AlertDialogAction>
               </AlertDialogFooter>
             </AlertDialogContent>

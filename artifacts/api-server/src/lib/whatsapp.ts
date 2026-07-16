@@ -486,6 +486,105 @@ class WhatsAppService {
     }
   }
 
+  /**
+   * Factory reset for the message pool:
+   * 1) Wipe pool (same listings can be collected again)
+   * 2) Keep WA message keys so history can be requested
+   * 3) Re-seed previous listings + pull up to 15 days of older history
+   */
+  async clearPoolAndRescan(): Promise<{
+    deleted: number;
+    restored: number;
+    message: string;
+  }> {
+    const snapshot = await db.select().from(whatsappMessagesTable);
+    const deleted = snapshot.length;
+
+    // Keep newest key per group so fetchMessageHistory still works after wipe
+    const newestByGroup = new Map<string, (typeof snapshot)[number]>();
+    for (const row of snapshot) {
+      const prev = newestByGroup.get(row.groupId);
+      if (!prev || row.timestamp > prev.timestamp) {
+        newestByGroup.set(row.groupId, row);
+      }
+    }
+    for (const [jid, row] of newestByGroup) {
+      this.lastMsgKeyByJid.set(jid, {
+        key: {
+          id: row.messageId,
+          remoteJid: jid,
+          fromMe: false,
+        },
+        tsSeconds: Math.floor(row.timestamp.getTime() / 1000),
+      });
+    }
+
+    // Also seed keys from selected groups that might have cache only
+    const selected = await this.getSelectedGroupIds();
+    for (const jid of selected) {
+      if (!this.lastMsgKeyByJid.has(jid)) {
+        await this.resolveNewestMessageKey(jid);
+      }
+    }
+
+    await db.delete(whatsappMessagesTable);
+    logger.info({ deleted }, "Pool wiped — factory reset (same listings allowed again)");
+
+    // Pull up to 15 days from WhatsApp (keys preserved in memory)
+    let histHint = "";
+    if (this.status.connected && selected.length > 0) {
+      try {
+        const hist = await this.fetchHistory();
+        histHint = ` ${hist.storedHint}`;
+      } catch (err) {
+        logger.error({ err }, "Rescan history after clear failed");
+        histHint =
+          " Geçmiş tarama şimdi yapılamadı; dinleme açık — yeni ilanlar gelecek.";
+      }
+    } else if (!this.status.connected) {
+      histHint = " WhatsApp bağlı değil — bağlanınca geçmişi tekrar tara.";
+    } else {
+      histHint = " Grup seçili değil — Gruplar sekmesinden seçim yap.";
+    }
+
+    // WhatsApp often won't re-send the same recent msgs via history API.
+    // Re-add cleared listings so factory reset brings the same pool back + older pages.
+    let restored = 0;
+    if (snapshot.length > 0) {
+      const fifteenDaysAgo = new Date();
+      fifteenDaysAgo.setDate(fifteenDaysAgo.getDate() - 15);
+
+      const rows = snapshot
+        .filter((row) => row.timestamp >= fifteenDaysAgo)
+        .map((row) => ({
+          messageId: row.messageId,
+          groupId: row.groupId,
+          groupName: row.groupName,
+          content: normalizeListingContent(row.content),
+          sender: row.sender,
+          timestamp: row.timestamp,
+          fetchedAt: new Date(),
+        }));
+
+      const chunkSize = 200;
+      for (let i = 0; i < rows.length; i += chunkSize) {
+        const chunk = rows.slice(i, i + chunkSize);
+        await db
+          .insert(whatsappMessagesTable)
+          .values(chunk)
+          .onConflictDoNothing();
+        restored += chunk.length;
+      }
+    }
+
+    const after = await this.countPoolMessages();
+    return {
+      deleted,
+      restored,
+      message: `Havuz sıfırlandı (${deleted} silindi → şimdi ${after} ilan). Aynı içerikler yeniden alınabilir.${histHint}`,
+    };
+  }
+
   private notifyHistoryBatch(): void {
     const waiters = this.historyBatchWaiters.splice(0);
     for (const w of waiters) w();

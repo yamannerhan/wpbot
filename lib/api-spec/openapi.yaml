@@ -310,6 +310,10 @@ components:
       properties:
         deleted:
           type: integer
+        restored:
+          type: integer
+        message:
+          type: string
 
     MessageStats:
       type: object

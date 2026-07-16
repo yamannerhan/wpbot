@@ -86,6 +86,8 @@ export interface MessagePage {
 
 export interface ClearResult {
   deleted: number;
+  restored?: number;
+  message?: string;
 }
 
 export type MessageStatsGroupsItem = {
