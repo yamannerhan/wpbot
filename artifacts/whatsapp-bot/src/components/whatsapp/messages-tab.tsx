@@ -274,8 +274,8 @@ export function MessagesTab() {
             <p className="text-sm mt-2 opacity-70 max-w-md text-center">
               Seçili grup/kanallardaki tüm mesajlar alınır (max 15 gün geri,
               gidebildiği kadar). Bağlantı kopunca kaldığı mesajdan devam eder.
-              Sadece WhatsApp mesaj ID tekrarlanmaz. Görselli ilanlarda
-              resimdeki yazılar OCR ile ayıklanıp medyanın altına eklenir.
+              Görselli mesajlar &quot;Medya&quot; olarak kaydedilir; altinda
+              resimden OCR ile ayıklanan ilan yazısı durur.
             </p>
             {debouncedSearch && (
               <p className="text-sm mt-2 opacity-70">

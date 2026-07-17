@@ -4,6 +4,7 @@ import makeWASocket, {
   fetchLatestBaileysVersion,
   Browsers,
   downloadMediaMessage,
+  downloadContentFromMessage,
   getBinaryNodeChild,
   getBinaryNodeChildren,
   S_WHATSAPP_NET,
@@ -1521,43 +1522,42 @@ class WhatsAppService {
           : null;
       if (!matchedJid) continue;
 
-      // ALL text (+ media + OCR from images) from selected groups/channels
-      let text = extractText(msg);
+      // Media: always label "Medya", OCR image text underneath
+      const caption = extractText(msg)?.trim() || "";
       const imageNode = getImageMessageNode(msg);
-      const hasMedia =
-        Boolean(imageNode) ||
-        Boolean(
-          msg.message?.videoMessage ||
-            msg.message?.documentMessage ||
-            msg.message?.stickerMessage ||
-            msg.message?.audioMessage ||
-            msg.message?.ephemeralMessage ||
-            msg.message?.viewOnceMessage ||
-            msg.message?.viewOnceMessageV2,
-        );
+      const isImageDoc = isImageDocument(msg);
+      const hasImage = Boolean(imageNode) || isImageDoc;
+      const hasOtherMedia = Boolean(
+        getInnerMessage(msg)?.videoMessage ||
+          getInnerMessage(msg)?.stickerMessage ||
+          getInnerMessage(msg)?.audioMessage ||
+          (getInnerMessage(msg)?.documentMessage && !isImageDoc),
+      );
 
-      if (!text && hasMedia) {
-        text = "[Medya mesajı]";
-      }
-      if (!text) {
+      let text = caption;
+
+      if (hasImage) {
+        let ocrText = "";
+        try {
+          ocrText = await this.ocrImageMessage(msg);
+        } catch (err) {
+          logger.warn({ err }, "OCR pipeline error");
+        }
+        const body = ocrText || caption || "(görselden yazı okunamadı)";
+        text = `Medya\n\n${body}`;
+        logger.info(
+          {
+            msgId: msg.key.id,
+            ocrChars: ocrText.length,
+            hasCaption: Boolean(caption),
+          },
+          "Media message processed",
+        );
+      } else if (hasOtherMedia && !text) {
+        text = "Medya";
+      } else if (!text) {
         skippedEmpty++;
         continue;
-      }
-
-      // Image ads: OCR text inside the picture and append under the media line
-      if (imageNode && this.sock) {
-        try {
-          const ocrText = await this.ocrImageMessage(msg);
-          if (ocrText) {
-            const caption = extractText(msg)?.trim() || "";
-            const head = caption || "[Medya mesajı — görsel]";
-            text = `${head}\n\n--- Görselden ayıklanan yazı ---\n${ocrText}`;
-          } else if (!extractText(msg)) {
-            text = "[Medya mesajı — görsel (yazı okunamadı)]";
-          }
-        } catch (err) {
-          logger.debug({ err }, "Image OCR skipped");
-        }
       }
 
       const content = normalizeListingContent(text);
@@ -1649,23 +1649,78 @@ class WhatsAppService {
   private async ocrImageMessage(
     msg: proto.IWebMessageInfo,
   ): Promise<string> {
-    if (!this.sock) return "";
-    try {
-      const buffer = (await downloadMediaMessage(
-        msg as any,
-        "buffer",
-        {},
-        {
-          logger: baileysLogger,
-          reuploadRequest: this.sock.updateMediaMessage,
-        },
-      )) as Buffer;
-      if (!buffer?.length) return "";
-      return await extractTextFromImage(buffer);
-    } catch (err) {
-      logger.debug({ err }, "downloadMediaMessage for OCR failed");
+    const buffer = await this.downloadImageBuffer(msg);
+    if (!buffer?.length) {
+      logger.warn({ msgId: msg.key?.id }, "Media download empty — OCR skipped");
       return "";
     }
+    return extractTextFromImage(buffer);
+  }
+
+  /** Download image bytes — try content stream first, then downloadMediaMessage. */
+  private async downloadImageBuffer(
+    msg: proto.IWebMessageInfo,
+  ): Promise<Buffer | null> {
+    const imageNode = getImageMessageNode(msg);
+    const doc = getInnerMessage(msg)?.documentMessage;
+    const isImgDoc =
+      doc?.mimetype?.startsWith("image/") ||
+      /\.(jpe?g|png|webp)$/i.test(doc?.fileName || "");
+
+    // 1) Direct content download (most reliable for imageMessage)
+    if (imageNode) {
+      try {
+        const stream = await downloadContentFromMessage(imageNode, "image");
+        const chunks: Buffer[] = [];
+        for await (const chunk of stream) {
+          chunks.push(Buffer.from(chunk));
+        }
+        const buf = Buffer.concat(chunks);
+        if (buf.length > 0) return buf;
+      } catch (err) {
+        logger.warn({ err }, "downloadContentFromMessage(image) failed");
+      }
+    }
+
+    if (doc && isImgDoc) {
+      try {
+        const stream = await downloadContentFromMessage(doc as any, "document");
+        const chunks: Buffer[] = [];
+        for await (const chunk of stream) {
+          chunks.push(Buffer.from(chunk));
+        }
+        const buf = Buffer.concat(chunks);
+        if (buf.length > 0) return buf;
+      } catch (err) {
+        logger.warn({ err }, "downloadContentFromMessage(document) failed");
+      }
+    }
+
+    // 2) Fallback: full media message helper
+    if (this.sock) {
+      try {
+        const rebuilt = imageNode
+          ? ({
+              ...msg,
+              message: { imageMessage: imageNode },
+            } as proto.IWebMessageInfo)
+          : msg;
+        const buffer = (await downloadMediaMessage(
+          rebuilt as any,
+          "buffer",
+          {},
+          {
+            logger: baileysLogger,
+            reuploadRequest: this.sock.updateMediaMessage,
+          },
+        )) as Buffer;
+        if (buffer?.length) return buffer;
+      } catch (err) {
+        logger.warn({ err }, "downloadMediaMessage fallback failed");
+      }
+    }
+
+    return null;
   }
 
   private async getGroupName(jid: string): Promise<string> {
@@ -1739,39 +1794,40 @@ function normalizeListingContent(text: string): string {
   return text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
 }
 
-function getImageMessageNode(
+function getInnerMessage(
   msg: proto.IWebMessageInfo,
-): proto.Message.IImageMessage | null {
+): proto.IMessage | null | undefined {
   const m = msg.message;
   if (!m) return null;
-  const inner =
+  return (
     m.ephemeralMessage?.message ||
     m.viewOnceMessage?.message ||
     m.viewOnceMessageV2?.message ||
     m.viewOnceMessageV2Extension?.message ||
     m.documentWithCaptionMessage?.message ||
-    m;
-  return (
-    (inner as typeof m)?.imageMessage ||
-    m.imageMessage ||
-    null
+    m
   );
+}
+
+function getImageMessageNode(
+  msg: proto.IWebMessageInfo,
+): proto.Message.IImageMessage | null {
+  const inner = getInnerMessage(msg);
+  return inner?.imageMessage || msg.message?.imageMessage || null;
+}
+
+function isImageDocument(msg: proto.IWebMessageInfo): boolean {
+  const doc = getInnerMessage(msg)?.documentMessage;
+  if (!doc) return false;
+  if (doc.mimetype?.startsWith("image/")) return true;
+  return /\.(jpe?g|png|webp|gif)$/i.test(doc.fileName || "");
 }
 
 function extractText(msg: proto.IWebMessageInfo): string | null {
   const m = msg.message;
   if (!m) return null;
 
-  // Unwrap common wrappers
-  const inner =
-    m.ephemeralMessage?.message ||
-    m.viewOnceMessage?.message ||
-    m.viewOnceMessageV2?.message ||
-    m.viewOnceMessageV2Extension?.message ||
-    m.documentWithCaptionMessage?.message ||
-    m.templateMessage?.hydratedFourRowTemplate ||
-    m;
-
+  const inner = getInnerMessage(msg) || m;
   const hydrated = (inner as typeof m)?.templateMessage?.hydratedTemplate;
 
   return (
