@@ -13,7 +13,8 @@
     "start": "node --enable-source-maps artifacts/api-server/dist/index.mjs",
     "start:prod": "pnpm run db:push && pnpm run start",
     "dev:api": "pnpm --filter @workspace/api-server run dev",
-    "dev:web": "pnpm --filter @workspace/whatsapp-bot run dev"
+    "dev:web": "pnpm --filter @workspace/whatsapp-bot run dev",
+    "sahibinden:bridge": "pnpm --filter @workspace/scripts run sahibinden:bridge"
   },
   "devDependencies": {
     "prettier": "^3.9.5",

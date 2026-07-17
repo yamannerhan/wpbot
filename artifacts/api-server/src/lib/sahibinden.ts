@@ -1,4 +1,5 @@
 import * as cheerio from "cheerio";
+import { ProxyAgent, fetch as undiciFetch, type Dispatcher } from "undici";
 import { db } from "@workspace/db";
 import {
   whatsappMessagesTable,
@@ -12,16 +13,14 @@ const DEFAULT_URL =
   "https://www.sahibinden.com/koruma-guvenlik-guvenlik-gorevlisi-is-ilanlari";
 const GENERAL_URL =
   "https://www.sahibinden.com/koruma-guvenlik-is-ilanlari";
+const HOME_URL = "https://www.sahibinden.com/";
 const LOOKBACK_MS = 15 * 24 * 60 * 60 * 1000;
 const POLL_MS = 30 * 60 * 1000;
 const GROUP_ID = "sahibinden:guvenlik";
 const GROUP_NAME = "Sahibinden";
 
-const UA_LIST = [
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15",
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:129.0) Gecko/20100101 Firefox/129.0",
-];
+const CHROME_UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
 type ListingCard = {
   id: string;
@@ -40,18 +39,16 @@ type Status = {
   total: number;
   lastAdded: number;
   lastError: string | null;
+  hasProxy: boolean;
+  hasCookies: boolean;
 };
 
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-function humanDelay(min = 1800, max = 4200) {
+function humanDelay(min = 2200, max = 5200) {
   return sleep(min + Math.floor(Math.random() * (max - min)));
-}
-
-function pickUa() {
-  return UA_LIST[Math.floor(Math.random() * UA_LIST.length)]!;
 }
 
 const TR_MONTHS: Record<string, number> = {
@@ -105,12 +102,79 @@ function extractPhone(text: string): string | null {
   return m ? m[0].replace(/\s+/g, " ").trim() : null;
 }
 
+function parseCookieHeader(raw: string): Map<string, string> {
+  const jar = new Map<string, string>();
+  if (!raw?.trim()) return jar;
+  for (const part of raw.split(";")) {
+    const idx = part.indexOf("=");
+    if (idx <= 0) continue;
+    const name = part.slice(0, idx).trim();
+    const value = part.slice(idx + 1).trim();
+    if (!name || name.toLowerCase() === "path" || name.toLowerCase() === "domain")
+      continue;
+    if (/expires|max-age|secure|httponly|samesite/i.test(name)) continue;
+    jar.set(name, value);
+  }
+  return jar;
+}
+
+function mergeSetCookies(jar: Map<string, string>, headers: Headers) {
+  const raw =
+    typeof headers.getSetCookie === "function"
+      ? headers.getSetCookie()
+      : [];
+  for (const line of raw) {
+    const first = line.split(";")[0] || "";
+    const idx = first.indexOf("=");
+    if (idx <= 0) continue;
+    jar.set(first.slice(0, idx).trim(), first.slice(idx + 1).trim());
+  }
+}
+
+function chromeHeaders(referer?: string, cookieHeader?: string): Record<string, string> {
+  const h: Record<string, string> = {
+    "User-Agent": CHROME_UA,
+    Accept:
+      "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+    "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Cache-Control": "max-age=0",
+    "Sec-Ch-Ua":
+      '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"Windows"',
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": referer ? "same-origin" : "none",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1",
+    Connection: "keep-alive",
+  };
+  if (referer) h.Referer = referer;
+  if (cookieHeader) h.Cookie = cookieHeader;
+  return h;
+}
+
 class SahibindenService {
   private timer: NodeJS.Timeout | null = null;
   private running = false;
   private nextFetchAt: Date | null = null;
   private lastAdded = 0;
   private lastError: string | null = null;
+  private cookieJar = new Map<string, string>();
+  private warmedUp = false;
+  private dispatcher: Dispatcher | undefined;
+
+  constructor() {
+    const proxy =
+      process.env.SAHIBINDEN_PROXY?.trim() ||
+      process.env.HTTPS_PROXY?.trim() ||
+      process.env.HTTP_PROXY?.trim();
+    if (proxy) {
+      this.dispatcher = new ProxyAgent(proxy);
+      logger.info("Sahibinden proxy enabled");
+    }
+  }
 
   async start(): Promise<void> {
     const cfg = await this.getConfig();
@@ -123,7 +187,6 @@ class SahibindenService {
       );
     }, POLL_MS);
     logger.info("Sahibinden listening ON — every 30 minutes");
-    // First pull shortly after boot
     setTimeout(() => {
       this.scan({ deep: false }).catch(() => undefined);
     }, 8000);
@@ -151,6 +214,7 @@ class SahibindenService {
     url: string;
     listening: boolean;
     lastFetchAt: Date | null;
+    cookies: string;
   }> {
     const rows = await db
       .select()
@@ -162,6 +226,29 @@ class SahibindenService {
       url: row?.sahibindenUrl || DEFAULT_URL,
       listening: row?.sahibindenListening ?? true,
       lastFetchAt: row?.sahibindenLastFetchAt ?? null,
+      cookies:
+        row?.sahibindenCookies?.trim() ||
+        process.env.SAHIBINDEN_COOKIES?.trim() ||
+        "",
+    };
+  }
+
+  async getStatus(): Promise<Status> {
+    const cfg = await this.getConfig();
+    const [{ count }] = await db
+      .select({ count: sql<number>`count(*)` })
+      .from(whatsappMessagesTable)
+      .where(like(whatsappMessagesTable.groupId, "sahibinden:%"));
+    return {
+      url: cfg.url,
+      listening: cfg.listening,
+      lastFetchAt: cfg.lastFetchAt?.toISOString() ?? null,
+      nextFetchAt: this.nextFetchAt?.toISOString() ?? null,
+      total: Number(count || 0),
+      lastAdded: this.lastAdded,
+      lastError: this.lastError,
+      hasProxy: Boolean(this.dispatcher),
+      hasCookies: Boolean(cfg.cookies || this.cookieJar.size),
     };
   }
 
@@ -170,6 +257,7 @@ class SahibindenService {
       sahibindenUrl: string;
       sahibindenLastFetchAt: Date;
       sahibindenListening: boolean;
+      sahibindenCookies: string;
     }>,
   ) {
     const rows = await db
@@ -185,6 +273,7 @@ class SahibindenService {
         sahibindenUrl: patch.sahibindenUrl ?? DEFAULT_URL,
         sahibindenLastFetchAt: patch.sahibindenLastFetchAt,
         sahibindenListening: patch.sahibindenListening ?? true,
+        sahibindenCookies: patch.sahibindenCookies,
       });
       return;
     }
@@ -201,33 +290,26 @@ class SahibindenService {
         ...(patch.sahibindenListening != null
           ? { sahibindenListening: patch.sahibindenListening }
           : {}),
+        ...(patch.sahibindenCookies != null
+          ? { sahibindenCookies: patch.sahibindenCookies }
+          : {}),
       })
       .where(eq(whatsappConfigTable.id, 1));
   }
 
-  async setUrl(url: string): Promise<void> {
-    const clean = url.trim() || DEFAULT_URL;
+  async setUrl(url: string) {
+    const clean = url.trim();
     await this.patchConfig({ sahibindenUrl: clean });
+    this.warmedUp = false;
   }
 
-  async getStatus(): Promise<Status> {
-    const cfg = await this.getConfig();
-    const countRows = await db
-      .select({ count: sql<number>`count(*)` })
-      .from(whatsappMessagesTable)
-      .where(like(whatsappMessagesTable.groupId, "sahibinden:%"));
-    return {
-      listening: cfg.listening && this.timer !== null,
-      url: cfg.url,
-      lastFetchAt: cfg.lastFetchAt?.toISOString() ?? null,
-      nextFetchAt: this.nextFetchAt?.toISOString() ?? null,
-      total: Number(countRows[0]?.count ?? 0),
-      lastAdded: this.lastAdded,
-      lastError: this.lastError,
-    };
+  async setCookies(cookies: string) {
+    await this.patchConfig({ sahibindenCookies: cookies.trim() });
+    this.cookieJar = parseCookieHeader(cookies);
+    this.warmedUp = false;
   }
 
-  async list(limit = 100, offset = 0, search?: string) {
+  async list(limit: number, offset: number, search?: string) {
     const rows = await db
       .select()
       .from(whatsappMessagesTable)
@@ -236,15 +318,11 @@ class SahibindenService {
       .limit(limit)
       .offset(offset);
 
-    let filtered = rows;
-    if (search?.trim()) {
-      const q = search.trim().toLocaleLowerCase("tr-TR");
-      filtered = rows.filter(
-        (r) =>
-          r.content.toLocaleLowerCase("tr-TR").includes(q) ||
-          r.sender.toLocaleLowerCase("tr-TR").includes(q),
-      );
-    }
+    const filtered = search
+      ? rows.filter((r) =>
+          r.content.toLowerCase().includes(search.toLowerCase()),
+        )
+      : rows;
 
     return {
       messages: filtered.map((m) => ({
@@ -262,13 +340,15 @@ class SahibindenService {
       .from(whatsappMessagesTable)
       .where(like(whatsappMessagesTable.groupId, "sahibinden:%"));
     if (existing.length) {
-      await db.insert(whatsappMessagesArchiveTable).values(existing).onConflictDoNothing();
+      await db
+        .insert(whatsappMessagesArchiveTable)
+        .values(existing)
+        .onConflictDoNothing();
     }
     await db
       .delete(whatsappMessagesTable)
       .where(like(whatsappMessagesTable.groupId, "sahibinden:%"));
 
-    // After clear: deep rescan (max 15 days) then keep listening
     void this.scan({ deep: true }).catch((err) =>
       logger.error({ err }, "Sahibinden post-clear deep scan failed"),
     );
@@ -278,6 +358,69 @@ class SahibindenService {
       deleted: existing.length,
       message: `Sahibinden havuzu temizlendi (${existing.length}). Son 15 gün yeniden taranıyor; dinleme açık.`,
     };
+  }
+
+  /** Ingest listings scraped from a home-PC bridge (residential IP). */
+  async ingestListings(
+    items: Array<{
+      id: string;
+      title: string;
+      url: string;
+      content: string;
+      sender?: string;
+      phone?: string | null;
+      location?: string;
+      timestamp?: string;
+    }>,
+  ): Promise<{ added: number }> {
+    let added = 0;
+    for (const item of items) {
+      const content = [
+        "Sahibinden",
+        "",
+        item.title,
+        item.location ? `Konum: ${item.location}` : "",
+        item.phone ? `Telefon: ${item.phone}` : "",
+        item.url,
+        "",
+        item.content,
+      ]
+        .filter(Boolean)
+        .join("\n");
+
+      const ts = item.timestamp ? new Date(item.timestamp) : new Date();
+      const row = {
+        messageId: String(item.id),
+        groupId: GROUP_ID,
+        groupName: GROUP_NAME,
+        content,
+        sender: item.sender || "Sahibinden",
+        timestamp: Number.isNaN(ts.getTime()) ? new Date() : ts,
+      };
+
+      const before = await db
+        .select({ id: whatsappMessagesTable.id })
+        .from(whatsappMessagesTable)
+        .where(
+          and(
+            eq(whatsappMessagesTable.messageId, row.messageId),
+            eq(whatsappMessagesTable.groupId, GROUP_ID),
+          ),
+        )
+        .limit(1);
+      if (before.length) continue;
+
+      await db.insert(whatsappMessagesTable).values(row).onConflictDoNothing();
+      await db
+        .insert(whatsappMessagesArchiveTable)
+        .values(row)
+        .onConflictDoNothing();
+      added++;
+    }
+    this.lastAdded = added;
+    this.lastError = null;
+    await this.patchConfig({ sahibindenLastFetchAt: new Date() });
+    return { added };
   }
 
   async scan(opts?: { deep?: boolean }): Promise<{
@@ -300,10 +443,9 @@ class SahibindenService {
     let scanned = 0;
 
     try {
+      await this.ensureSession();
       const cfg = await this.getConfig();
-      const urls = Array.from(
-        new Set([cfg.url || DEFAULT_URL, GENERAL_URL]),
-      );
+      const urls = Array.from(new Set([cfg.url || DEFAULT_URL, GENERAL_URL]));
 
       for (const listUrl of urls) {
         const cards = await this.fetchListingCards(listUrl, deep ? 8 : 3);
@@ -320,7 +462,7 @@ class SahibindenService {
               ),
             )
             .limit(1);
-          if (exists.length) continue; // already in pool — skip (clear → deep rescan fills empty)
+          if (exists.length) continue;
 
           await humanDelay();
           const detail = await this.fetchDetail(card);
@@ -392,30 +534,82 @@ class SahibindenService {
     }
   }
 
-  private async fetchHtml(url: string, referer?: string): Promise<string> {
-    const res = await fetch(url, {
-      headers: {
-        "User-Agent": pickUa(),
-        Accept:
-          "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Cache-Control": "no-cache",
-        Pragma: "no-cache",
-        "Upgrade-Insecure-Requests": "1",
-        ...(referer ? { Referer: referer } : {}),
-      },
-      redirect: "follow",
-    });
-    if (!res.ok) {
-      throw new Error(`HTTP ${res.status} for ${url}`);
+  private cookieHeader(): string {
+    return Array.from(this.cookieJar.entries())
+      .map(([k, v]) => `${k}=${v}`)
+      .join("; ");
+  }
+
+  private async ensureSession() {
+    const cfg = await this.getConfig();
+    if (cfg.cookies && this.cookieJar.size === 0) {
+      this.cookieJar = parseCookieHeader(cfg.cookies);
     }
+    if (this.warmedUp && this.cookieJar.size > 0) return;
+
+    // Human path: open homepage first, wait, then continue
+    await this.fetchHtml(HOME_URL, undefined, { allowSoftFail: true });
+    await humanDelay(1500, 3200);
+    await this.fetchHtml(
+      "https://www.sahibinden.com/is-ilanlari",
+      HOME_URL,
+      { allowSoftFail: true },
+    );
+    await humanDelay(1200, 2800);
+    this.warmedUp = true;
+  }
+
+  private blockHint(status: number): string {
+    const hasProxy = Boolean(this.dispatcher);
+    if (status === 403 || status === 429 || status === 503) {
+      if (!hasProxy) {
+        return (
+          `Sahibinden sunucu IP'sini engelledi (HTTP ${status}). ` +
+          `Railway veri merkezi IP'si bot sanılıyor. Çözüm: Railway'e Türk ev/residential proxy ekle ` +
+          `(SAHIBINDEN_PROXY) veya bilgisayarında yerel köprü çalıştır: pnpm sahibinden:bridge`
+        );
+      }
+      return `Sahibinden HTTP ${status} — proxy/cookie geçersiz veya banlı olabilir. Cookie yenile veya başka proxy dene.`;
+    }
+    return `HTTP ${status}`;
+  }
+
+  private async fetchHtml(
+    url: string,
+    referer?: string,
+    opts?: { allowSoftFail?: boolean },
+  ): Promise<string> {
+    const cookie = this.cookieHeader();
+    const res = await undiciFetch(url, {
+      method: "GET",
+      headers: chromeHeaders(referer, cookie || undefined),
+      redirect: "follow",
+      dispatcher: this.dispatcher,
+    });
+
+    mergeSetCookies(this.cookieJar, res.headers as unknown as Headers);
+
+    if (!res.ok) {
+      const hint = this.blockHint(res.status);
+      if (opts?.allowSoftFail) {
+        logger.warn({ url, status: res.status }, "Sahibinden soft-fail fetch");
+        return "";
+      }
+      throw new Error(`${hint} — ${url}`);
+    }
+
     const html = await res.text();
     if (
-      /giriş yap|login|cloudflare|captcha|access denied|bot/i.test(html) &&
-      html.length < 5000
+      /cloudflare|captcha|access denied|just a moment/i.test(html) &&
+      html.length < 8000
     ) {
       throw new Error(
-        "Sahibinden bot koruması / giriş engeli olabilir. Bir süre sonra tekrar denenecek.",
+        this.blockHint(403) + " (Cloudflare/captcha sayfası döndü)",
+      );
+    }
+    if (/sahibinden\.com\/giris/i.test(res.url) || /\/giris\b/i.test(html.slice(0, 2000))) {
+      throw new Error(
+        "Sahibinden giriş sayfasına yönlendirdi. Chrome'dan cookie yapıştırın veya residential proxy kullanın.",
       );
     }
     return html;
@@ -433,8 +627,12 @@ class SahibindenService {
         page === 1
           ? listUrl
           : `${listUrl}${listUrl.includes("?") ? "&" : "?"}pagingOffset=${(page - 1) * 20}`;
-      if (page > 1) await humanDelay(2500, 5500);
-      const html = await this.fetchHtml(url, "https://www.sahibinden.com/");
+      if (page > 1) await humanDelay(2800, 6000);
+      const html = await this.fetchHtml(
+        url,
+        page === 1 ? "https://www.sahibinden.com/is-ilanlari" : listUrl,
+      );
+      if (!html) break;
       const $ = cheerio.load(html);
 
       $("tr.searchResultsItem, tr[data-id], .searchResultsItem").each(
@@ -449,7 +647,8 @@ class SahibindenService {
           const full = href.startsWith("http")
             ? href
             : `https://www.sahibinden.com${href}`;
-          const idMatch = full.match(/-(\d+)(?:\/|$)/) || full.match(/\/(\d{6,})/);
+          const idMatch =
+            full.match(/-(\d+)(?:\/|$)/) || full.match(/\/(\d{6,})/);
           const id =
             row.attr("data-id") ||
             idMatch?.[1] ||
@@ -465,7 +664,9 @@ class SahibindenService {
             .replace(/\s+/g, " ")
             .trim();
           const location = row
-            .find(".searchResultsLocationValue, td.searchResultsLocationValue")
+            .find(
+              ".searchResultsLocationValue, td.searchResultsLocationValue",
+            )
             .first()
             .text()
             .replace(/\s+/g, " ")
@@ -482,7 +683,6 @@ class SahibindenService {
         },
       );
 
-      // Fallback: any ilan links on page
       if (out.length === 0) {
         $('a[href*="/ilan/"]').each((_, el) => {
           const href = $(el).attr("href") || "";
@@ -507,6 +707,7 @@ class SahibindenService {
         });
       }
 
+      if (out.length === 0 && page === 1) break;
       if (out.length === 0) break;
     }
 
@@ -565,10 +766,9 @@ class SahibindenService {
         card.date;
 
       const location =
-        infoLines.find((l) => /il\s*\/\s*ilçe|il \/ ilce/i.test(l))?.replace(
-          /.*?:\s*/i,
-          "",
-        ) || card.location;
+        infoLines
+          .find((l) => /il\s*\/\s*ilçe|il \/ ilce/i.test(l))
+          ?.replace(/.*?:\s*/i, "") || card.location;
 
       const body = [infoLines.join("\n"), "", desc].filter(Boolean).join("\n");
 
@@ -590,7 +790,6 @@ class SahibindenService {
 
 export const sahibindenService = new SahibindenService();
 
-// Auto-start listening when API boots
 sahibindenService.start().catch((err) =>
   logger.error({ err }, "Sahibinden auto-start failed"),
 );

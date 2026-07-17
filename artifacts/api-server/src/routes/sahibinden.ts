@@ -17,6 +17,12 @@ router.post("/sahibinden/url", async (req, res): Promise<void> => {
   res.json({ ok: true, ...(await sahibindenService.getStatus()) });
 });
 
+router.post("/sahibinden/cookies", async (req, res): Promise<void> => {
+  const cookies = String(req.body?.cookies || "");
+  await sahibindenService.setCookies(cookies);
+  res.json({ ok: true, ...(await sahibindenService.getStatus()) });
+});
+
 router.post("/sahibinden/scan", async (req, res): Promise<void> => {
   const deep = Boolean(req.body?.deep);
   const result = await sahibindenService.scan({ deep });
@@ -38,6 +44,21 @@ router.get("/sahibinden/messages", async (req, res): Promise<void> => {
   const offset = Number(req.query.offset) || 0;
   const search = req.query.search ? String(req.query.search) : undefined;
   res.json(await sahibindenService.list(limit, offset, search));
+});
+
+/** Local PC bridge pushes scraped listings here (home residential IP). */
+router.post("/sahibinden/ingest", async (req, res): Promise<void> => {
+  const items = Array.isArray(req.body?.items) ? req.body.items : [];
+  if (!items.length) {
+    res.status(400).json({ error: "items array required" });
+    return;
+  }
+  const result = await sahibindenService.ingestListings(items);
+  res.json({
+    ok: true,
+    ...result,
+    message: `${result.added} ilan köprüden eklendi`,
+  });
 });
 
 export default router;

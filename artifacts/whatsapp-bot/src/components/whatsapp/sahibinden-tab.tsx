@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Textarea } from '@/components/ui/textarea';
 import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import {
@@ -28,6 +29,8 @@ type Status = {
   total: number;
   lastAdded: number;
   lastError: string | null;
+  hasProxy?: boolean;
+  hasCookies?: boolean;
 };
 
 type Msg = {
@@ -65,6 +68,7 @@ export function SahibindenTab() {
   const [status, setStatus] = useState<Status | null>(null);
   const [messages, setMessages] = useState<Msg[]>([]);
   const [url, setUrl] = useState(DEFAULT_URL);
+  const [cookies, setCookies] = useState('');
   const [loading, setLoading] = useState(true);
   const [scanning, setScanning] = useState(false);
 
@@ -102,6 +106,16 @@ export function SahibindenTab() {
     refresh();
   };
 
+  const saveCookies = async () => {
+    await fetch(`${apiBase()}/sahibinden/cookies`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cookies }),
+    });
+    toast.success('Cookie kaydedildi');
+    refresh();
+  };
+
   const scan = async (deep: boolean) => {
     setScanning(true);
     try {
@@ -111,7 +125,11 @@ export function SahibindenTab() {
         body: JSON.stringify({ deep }),
       });
       const data = await res.json();
-      toast.success(data.message || 'Tarama bitti');
+      if (String(data.message || '').includes('hata') || String(data.message || '').includes('engelledi')) {
+        toast.error(data.message || 'Tarama başarısız');
+      } else {
+        toast.success(data.message || 'Tarama bitti');
+      }
       await refresh();
     } catch {
       toast.error('Tarama başarısız');
@@ -181,9 +199,18 @@ export function SahibindenTab() {
 
       <Card className="p-4 border-border/50 space-y-3 shrink-0">
         <p className="text-sm text-muted-foreground">
-          Güvenlik görevlisi / özel güvenlik sayfasını tarar. Giriş gerekmez; insan gibi
-          gecikmeli istek atar. Havuz etiketi: <strong>Sahibinden</strong>.
+          Sahibinden Railway (sunucu) IP&apos;lerini bot diye engeller. Siteye insan gibi
+          (Chrome header + cookie + anasayfa ısınma) gidilir; yine 403 olursa ev IP&apos;si
+          veya residential proxy gerekir.
         </p>
+        <div className="flex flex-wrap gap-2 text-xs">
+          <Badge variant={status?.hasProxy ? 'default' : 'secondary'}>
+            Proxy: {status?.hasProxy ? 'açık' : 'yok'}
+          </Badge>
+          <Badge variant={status?.hasCookies ? 'default' : 'secondary'}>
+            Cookie: {status?.hasCookies ? 'var' : 'yok'}
+          </Badge>
+        </div>
         <div className="flex flex-col md:flex-row gap-2">
           <Input
             value={url}
@@ -194,6 +221,33 @@ export function SahibindenTab() {
           <Button variant="secondary" onClick={saveUrl}>
             Linki Kaydet
           </Button>
+        </div>
+        <div className="space-y-2">
+          <Textarea
+            value={cookies}
+            onChange={(e) => setCookies(e.target.value)}
+            placeholder="Chrome cookie (isteğe bağlı): F12 → Application → Cookies → sahibinden.com satırlarını name=value; name2=value2 olarak yapıştır"
+            className="min-h-[72px] text-xs font-mono"
+          />
+          <Button variant="outline" size="sm" onClick={saveCookies}>
+            Cookie Kaydet
+          </Button>
+        </div>
+        <div className="rounded-md border border-border/60 bg-muted/30 p-3 text-xs text-muted-foreground space-y-1">
+          <p className="font-medium text-foreground">403 / bağlanmıyor — ne yapmalısın?</p>
+          <p>
+            Sahibinden, Railway ve Node isteklerini bot diye keser. En sağlam yol:
+            kendi bilgisayarındaki Chrome ile köprü:
+          </p>
+          <p className="font-mono text-foreground break-all">
+            $env:SAHIBINDEN_API=&quot;https://wphot-production-cf99.up.railway.app&quot;
+            <br />
+            pnpm sahibinden:bridge
+          </p>
+          <p>
+            Alternatif: Railway Variables&apos;a Türk residential proxy:{' '}
+            <code className="text-foreground">SAHIBINDEN_PROXY</code>
+          </p>
         </div>
         <div className="flex flex-wrap gap-2">
           <Button onClick={() => scan(true)} disabled={scanning} className="gap-2">
@@ -226,7 +280,7 @@ export function SahibindenTab() {
           </AlertDialog>
         </div>
         {status?.lastError && (
-          <p className="text-sm text-destructive">{status.lastError}</p>
+          <p className="text-sm text-destructive whitespace-pre-wrap">{status.lastError}</p>
         )}
       </Card>
 
@@ -236,7 +290,7 @@ export function SahibindenTab() {
             <div className="text-center text-muted-foreground py-16">
               <p>Henüz Sahibinden ilanı yok.</p>
               <p className="text-sm mt-2 opacity-70">
-                Linki kaydedip &quot;Yeniden Tara (15 gün)&quot; ile başlayın.
+                Proxy / cookie / yerel köprü ile tarama yapın.
               </p>
             </div>
           ) : (

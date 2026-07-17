@@ -5,7 +5,12 @@
   "type": "module",
   "scripts": {
     "hello": "tsx ./src/hello.ts",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "sahibinden:bridge": "node ./sahibinden-bridge.mjs"
+  },
+  "dependencies": {
+    "cheerio": "^1.1.2",
+    "playwright": "^1.61.1"
   },
   "devDependencies": {
     "@types/node": "catalog:",

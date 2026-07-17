@@ -61,6 +61,8 @@ export const whatsappConfigTable = pgTable("whatsapp_config", {
   sahibindenUrl: text("sahibinden_url"),
   sahibindenLastFetchAt: timestamp("sahibinden_last_fetch_at"),
   sahibindenListening: boolean("sahibinden_listening").notNull().default(true),
+  /** Optional browser Cookie header from a real Chrome session */
+  sahibindenCookies: text("sahibinden_cookies"),
 });
 
 export type WhatsappMessage = typeof whatsappMessagesTable.$inferSelect;
