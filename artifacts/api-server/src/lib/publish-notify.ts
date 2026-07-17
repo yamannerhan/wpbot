@@ -62,11 +62,28 @@ export async function markPublishedByMessageKeys(
   }
 }
 
-export async function listPendingForPublish(limit = 50, afterId = 0) {
+export type PublishPool = "all" | "text" | "media";
+
+const mediaContent = sql`${whatsappMessagesTable.content} ~* '^Medya(\\n|$)'`;
+const textContent = sql`${whatsappMessagesTable.content} !~* '^Medya(\\n|$)'`;
+
+function poolCondition(pool: PublishPool = "all") {
+  if (pool === "media") return mediaContent;
+  if (pool === "text") return textContent;
+  return null;
+}
+
+export async function listPendingForPublish(
+  limit = 50,
+  afterId = 0,
+  pool: PublishPool = "all",
+) {
   const conditions = [
     isNull(whatsappMessagesTable.publishedAt),
     not(like(whatsappMessagesTable.groupId, "sahibinden:%")),
   ];
+  const poolCond = poolCondition(pool);
+  if (poolCond) conditions.push(poolCond);
   if (afterId > 0) {
     conditions.push(gt(whatsappMessagesTable.id, afterId));
   }
@@ -78,16 +95,17 @@ export async function listPendingForPublish(limit = 50, afterId = 0) {
     .limit(Math.min(limit, 200));
 }
 
-export async function countPending(): Promise<number> {
+export async function countPending(pool: PublishPool = "all"): Promise<number> {
+  const conditions = [
+    isNull(whatsappMessagesTable.publishedAt),
+    not(like(whatsappMessagesTable.groupId, "sahibinden:%")),
+  ];
+  const poolCond = poolCondition(pool);
+  if (poolCond) conditions.push(poolCond);
   const [row] = await db
     .select({ count: sql<number>`count(*)` })
     .from(whatsappMessagesTable)
-    .where(
-      and(
-        isNull(whatsappMessagesTable.publishedAt),
-        not(like(whatsappMessagesTable.groupId, "sahibinden:%")),
-      ),
-    );
+    .where(and(...conditions));
   return Number(row?.count ?? 0);
 }
 

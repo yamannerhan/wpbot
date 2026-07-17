@@ -181,19 +181,91 @@ router.get("/whatsapp/messages", async (req, res): Promise<void> => {
   });
 });
 
-/** Çeken bot: kaldığı yerden sırayla al (id ASC). */
+/** Çeken bot: kaldığı yerden sırayla al (id ASC). ?pool=text|media|all */
 router.get("/whatsapp/messages/pending", async (req, res): Promise<void> => {
   const limit = Math.min(Number(req.query.limit) || 50, 200);
   const afterId = Number(req.query.afterId) || 0;
+  const poolRaw = String(req.query.pool || "all");
+  const pool =
+    poolRaw === "media" || poolRaw === "text" || poolRaw === "all"
+      ? poolRaw
+      : "all";
   const {
     listPendingForPublish,
     countPending,
   } = await import("../lib/publish-notify.js");
   const [messages, pendingTotal] = await Promise.all([
-    listPendingForPublish(limit, afterId),
-    countPending(),
+    listPendingForPublish(limit, afterId, pool),
+    countPending(pool),
   ]);
   res.json({
+    messages: messages.map((m) => ({
+      ...m,
+      timestamp: m.timestamp.toISOString(),
+      fetchedAt: m.fetchedAt.toISOString(),
+      publishedAt: null,
+    })),
+    pendingTotal,
+    afterId,
+    pool,
+  });
+});
+
+/** Bot için kısa medya havuzu linki (= messages?pool=media) */
+router.get("/whatsapp/media", async (req, res): Promise<void> => {
+  const params = GetMessagesQueryParams.safeParse({ ...req.query, pool: "media" });
+  if (!params.success) {
+    res.status(400).json({ error: params.error.message });
+    return;
+  }
+  const { groupId, search, limit = 100, offset = 0 } = params.data;
+  const conditions = [
+    notSahibinden,
+    sql`${whatsappMessagesTable.content} ~* '^Medya(\\n|$)'`,
+  ];
+  if (groupId) conditions.push(eq(whatsappMessagesTable.groupId, groupId));
+  if (search) {
+    conditions.push(ilike(whatsappMessagesTable.content, `%${search}%`));
+  }
+  const whereClause = and(...conditions);
+  const [messages, countResult] = await Promise.all([
+    db
+      .select()
+      .from(whatsappMessagesTable)
+      .where(whereClause)
+      .orderBy(desc(whatsappMessagesTable.fetchedAt))
+      .limit(limit)
+      .offset(offset),
+    db
+      .select({ count: sql<number>`count(*)` })
+      .from(whatsappMessagesTable)
+      .where(whereClause),
+  ]);
+  res.json({
+    pool: "media",
+    messages: messages.map((m) => ({
+      ...m,
+      timestamp: m.timestamp.toISOString(),
+      fetchedAt: m.fetchedAt.toISOString(),
+      publishedAt: m.publishedAt ? m.publishedAt.toISOString() : null,
+    })),
+    total: Number(countResult[0]?.count ?? 0),
+  });
+});
+
+/** Bot: sadece medya pending */
+router.get("/whatsapp/media/pending", async (req, res): Promise<void> => {
+  const limit = Math.min(Number(req.query.limit) || 50, 200);
+  const afterId = Number(req.query.afterId) || 0;
+  const { listPendingForPublish, countPending } = await import(
+    "../lib/publish-notify.js"
+  );
+  const [messages, pendingTotal] = await Promise.all([
+    listPendingForPublish(limit, afterId, "media"),
+    countPending("media"),
+  ]);
+  res.json({
+    pool: "media",
     messages: messages.map((m) => ({
       ...m,
       timestamp: m.timestamp.toISOString(),
