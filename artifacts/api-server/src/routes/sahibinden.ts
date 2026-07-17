@@ -19,8 +19,23 @@ router.post("/sahibinden/url", async (req, res): Promise<void> => {
 
 router.post("/sahibinden/cookies", async (req, res): Promise<void> => {
   const cookies = String(req.body?.cookies || "");
-  await sahibindenService.setCookies(cookies);
-  res.json({ ok: true, ...(await sahibindenService.getStatus()) });
+  const cookieList = Array.isArray(req.body?.cookieList)
+    ? req.body.cookieList
+    : undefined;
+  await sahibindenService.setCookies(cookies, cookieList);
+  // Giriş kaydı sonrası otomatik dinleme + tarama
+  await sahibindenService.enableListen();
+  void sahibindenService.scan({ deep: true }).catch(() => undefined);
+  res.json({
+    ok: true,
+    message: "Oturum kaydedildi. Ozel guvenlik ilanlari otomatik cekilecek.",
+    ...(await sahibindenService.getStatus()),
+  });
+});
+
+router.get("/sahibinden/login-url", async (_req, res): Promise<void> => {
+  const status = await sahibindenService.getStatus();
+  res.json({ loginUrl: status.loginUrl, loggedIn: status.loggedIn });
 });
 
 router.post("/sahibinden/scan", async (req, res): Promise<void> => {

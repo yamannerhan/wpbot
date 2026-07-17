@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Textarea } from '@/components/ui/textarea';
 import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import {
@@ -15,11 +14,21 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from '@/components/ui/alert-dialog';
-import { Loader2, History, Trash2, ExternalLink, Clock, Radio } from 'lucide-react';
+import {
+  Loader2,
+  History,
+  Trash2,
+  ExternalLink,
+  Clock,
+  Radio,
+  LogIn,
+} from 'lucide-react';
 import { toast } from 'sonner';
 
 const DEFAULT_URL =
   'https://www.sahibinden.com/koruma-guvenlik-guvenlik-gorevlisi-is-ilanlari';
+const DEFAULT_LOGIN =
+  'https://secure.sahibinden.com/giris?return_url=https%3A%2F%2Fwww.sahibinden.com%2Fkoruma-guvenlik-guvenlik-gorevlisi-is-ilanlari';
 
 type Status = {
   listening: boolean;
@@ -30,6 +39,8 @@ type Status = {
   lastAdded: number;
   lastError: string | null;
   mode?: string;
+  loggedIn?: boolean;
+  loginUrl?: string;
 };
 
 type Msg = {
@@ -67,7 +78,6 @@ export function SahibindenTab() {
   const [status, setStatus] = useState<Status | null>(null);
   const [messages, setMessages] = useState<Msg[]>([]);
   const [url, setUrl] = useState(DEFAULT_URL);
-  const [cookies, setCookies] = useState('');
   const [loading, setLoading] = useState(true);
   const [scanning, setScanning] = useState(false);
 
@@ -91,7 +101,7 @@ export function SahibindenTab() {
 
   useEffect(() => {
     refresh();
-    const t = setInterval(refresh, 20000);
+    const t = setInterval(refresh, 15000);
     return () => clearInterval(t);
   }, []);
 
@@ -101,18 +111,13 @@ export function SahibindenTab() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ url }),
     });
-    toast.success('Sahibinden linki kaydedildi');
+    toast.success('Link kaydedildi');
     refresh();
   };
 
-  const saveCookies = async () => {
-    await fetch(`${apiBase()}/sahibinden/cookies`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ cookies }),
-    });
-    toast.success('Cookie kaydedildi');
-    refresh();
+  const openLogin = () => {
+    window.open(status?.loginUrl || DEFAULT_LOGIN, '_blank', 'noopener,noreferrer');
+    toast.message('Giriş sayfası açıldı — Google ile giriş yap, sonra PC’de Sahibinden-Giris.cmd çalıştır');
   };
 
   const scan = async (deep: boolean) => {
@@ -124,7 +129,10 @@ export function SahibindenTab() {
         body: JSON.stringify({ deep }),
       });
       const data = await res.json();
-      if (String(data.message || '').includes('hata') || String(data.message || '').includes('giriş')) {
+      if (
+        String(data.message || '').includes('hata') ||
+        String(data.message || '').includes('giriş')
+      ) {
         toast.error(data.message || 'Tarama başarısız');
       } else {
         toast.success(data.message || 'Tarama bitti');
@@ -163,16 +171,16 @@ export function SahibindenTab() {
         </Card>
         <Card className="p-4 border-border/50">
           <p className="text-xs text-muted-foreground uppercase font-semibold tracking-wider mb-2">
-            Durum
+            Oturum
           </p>
           <div className="flex items-center gap-2">
             <div
               className={`w-3 h-3 rounded-full ${
-                status?.listening ? 'bg-primary animate-pulse' : 'bg-muted-foreground'
+                status?.loggedIn ? 'bg-primary' : 'bg-destructive'
               }`}
             />
             <span className="font-semibold">
-              {status?.listening ? 'Dinlemede (30 dk)' : 'Kapalı'}
+              {status?.loggedIn ? 'Girişli' : 'Giriş yok'}
             </span>
           </div>
         </Card>
@@ -189,20 +197,54 @@ export function SahibindenTab() {
           <div className="flex items-center gap-2 mb-2">
             <Radio className="w-4 h-4 text-muted-foreground" />
             <p className="text-xs text-muted-foreground uppercase font-semibold tracking-wider">
-              Sonraki
+              Dinleme
             </p>
           </div>
-          <p className="text-sm font-mono">{formatAt(status?.nextFetchAt ?? null)}</p>
+          <p className="text-sm font-semibold">
+            {status?.listening ? 'Açık (30 dk)' : 'Kapalı'}
+          </p>
         </Card>
       </div>
 
-      <Card className="p-4 border-border/50 space-y-3 shrink-0">
-        <p className="text-sm text-muted-foreground">
-          Railway üzerinde headless <strong>Chromium</strong> ile doğrudan ilan
-          sayfasına girer (giriş yapılmaz). Her 30 dk otomatik tarar. Cloudflare
-          kutusu otomatik tıklanır.
-        </p>
-        <Badge variant="secondary">Mod: {status?.mode || 'chromium'}</Badge>
+      <Card className="p-4 border-border/50 space-y-4 shrink-0">
+        <div className="rounded-lg border border-primary/30 bg-primary/5 p-4 space-y-3">
+          <p className="font-semibold text-foreground">
+            1) İlk giriş (bir kez, elle — Google)
+          </p>
+          <p className="text-sm text-muted-foreground">
+            Sahibinden bot IP&apos;sine giriş zorunlu tutuyor. Sen bir kez Google ile
+            giriş yap; oturum Railway&apos;e kaydolur. Sonrası özel güvenlik ilanlarını
+            sunucu Chromium ile 30 dk&apos;da bir otomatik çeker — ekranında tarayıcı
+            açılmaz.
+          </p>
+          <div className="flex flex-wrap gap-2">
+            <Button onClick={openLogin} className="gap-2">
+              <LogIn className="w-4 h-4" />
+              Sahibinden Giriş Sayfasını Aç
+            </Button>
+            <Button variant="secondary" asChild>
+              <a
+                href={status?.loginUrl || DEFAULT_LOGIN}
+                target="_blank"
+                rel="noreferrer"
+              >
+                Yeni sekmede aç
+              </a>
+            </Button>
+          </div>
+          <ol className="text-sm text-muted-foreground list-decimal pl-5 space-y-1">
+            <li>Yukarıdan giriş sayfasını aç → <strong>Google ile giriş yap</strong></li>
+            <li>
+              Masaüstündeki proje klasöründe <code className="text-foreground">Sahibinden-Giris.cmd</code> dosyasına çift tıkla
+              (Chrome açılır, girişini algılar, oturumu sunucuya yollar)
+            </li>
+            <li>
+              Veya: <code className="text-foreground">pnpm sahibinden:login</code>
+            </li>
+            <li>Oturum: <strong>{status?.loggedIn ? 'Girişli ✓' : 'Henüz yok'}</strong></li>
+          </ol>
+        </div>
+
         <div className="flex flex-col md:flex-row gap-2">
           <Input
             value={url}
@@ -214,23 +256,21 @@ export function SahibindenTab() {
             Linki Kaydet
           </Button>
         </div>
-        <div className="space-y-2">
-          <Textarea
-            value={cookies}
-            onChange={(e) => setCookies(e.target.value)}
-            placeholder="İsteğe bağlı: giriş duvarı gelirse Chrome cookie yapıştır (F12 → Application → Cookies)"
-            className="min-h-[64px] text-xs font-mono"
-          />
-          <Button variant="outline" size="sm" onClick={saveCookies}>
-            Cookie Kaydet
-          </Button>
-        </div>
+
         <div className="flex flex-wrap gap-2">
-          <Button onClick={() => scan(true)} disabled={scanning} className="gap-2">
+          <Button
+            onClick={() => scan(true)}
+            disabled={scanning || !status?.loggedIn}
+            className="gap-2"
+          >
             {scanning ? <Loader2 className="w-4 h-4 animate-spin" /> : <History className="w-4 h-4" />}
             Yeniden Tara (15 gün)
           </Button>
-          <Button variant="outline" onClick={() => scan(false)} disabled={scanning}>
+          <Button
+            variant="outline"
+            onClick={() => scan(false)}
+            disabled={scanning || !status?.loggedIn}
+          >
             Hızlı Tara
           </Button>
           <AlertDialog>
@@ -244,8 +284,8 @@ export function SahibindenTab() {
               <AlertDialogHeader>
                 <AlertDialogTitle>Sahibinden havuzunu temizle?</AlertDialogTitle>
                 <AlertDialogDescription>
-                  Sadece Sahibinden ilanları silinir; ardından Chromium ile max 15
-                  gün yeniden taranır.
+                  İlanlar silinir; oturum durursa tekrar Sahibinden-Giris.cmd ile giriş
+                  gerekir.
                 </AlertDialogDescription>
               </AlertDialogHeader>
               <AlertDialogFooter>
@@ -255,6 +295,11 @@ export function SahibindenTab() {
             </AlertDialogContent>
           </AlertDialog>
         </div>
+        {!status?.loggedIn && (
+          <p className="text-sm text-amber-600 dark:text-amber-400">
+            Önce Google girişini tamamla (Sahibinden-Giris.cmd). Sonra tarama açılır.
+          </p>
+        )}
         {status?.lastError && (
           <p className="text-sm text-destructive whitespace-pre-wrap">{status.lastError}</p>
         )}
@@ -266,7 +311,7 @@ export function SahibindenTab() {
             <div className="text-center text-muted-foreground py-16">
               <p>Henüz Sahibinden ilanı yok.</p>
               <p className="text-sm mt-2 opacity-70">
-                Deploy sonrası otomatik dinleme başlar; veya Yeniden Tara.
+                Giriş yap → oturum kaydolunca özel güvenlik ilanları buraya düşer.
               </p>
             </div>
           ) : (

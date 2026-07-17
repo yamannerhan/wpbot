@@ -15,6 +15,8 @@ const GENERAL_URL =
   "https://www.sahibinden.com/koruma-guvenlik-is-ilanlari";
 const LOOKBACK_MS = 15 * 24 * 60 * 60 * 1000;
 const POLL_MS = 30 * 60 * 1000;
+const LOGIN_URL =
+  "https://secure.sahibinden.com/giris?return_url=https%3A%2F%2Fwww.sahibinden.com%2Fkoruma-guvenlik-guvenlik-gorevlisi-is-ilanlari";
 const GROUP_ID = "sahibinden:guvenlik";
 const GROUP_NAME = "Sahibinden";
 
@@ -36,6 +38,8 @@ type Status = {
   lastAdded: number;
   lastError: string | null;
   mode: "chromium";
+  loggedIn: boolean;
+  loginUrl: string;
 };
 
 function sleep(ms: number) {
@@ -297,6 +301,8 @@ class SahibindenService {
       lastAdded: this.lastAdded,
       lastError: this.lastError,
       mode: "chromium",
+      loggedIn: Boolean(cfg.cookies && cfg.cookies.length > 20),
+      loginUrl: LOGIN_URL,
     };
   }
 
@@ -349,8 +355,75 @@ class SahibindenService {
     await this.patchConfig({ sahibindenUrl: url.trim() });
   }
 
-  async setCookies(cookies: string) {
-    await this.patchConfig({ sahibindenCookies: cookies.trim() });
+  async setCookies(
+    cookies: string,
+    cookieList?: Array<{
+      name: string;
+      value: string;
+      domain?: string;
+      path?: string;
+      expires?: number;
+      httpOnly?: boolean;
+      secure?: boolean;
+      sameSite?: "Strict" | "Lax" | "None";
+    }>,
+  ) {
+    let header = cookies.trim();
+    if (!header && cookieList?.length) {
+      header = cookieList.map((c) => `${c.name}=${c.value}`).join("; ");
+    }
+    // Playwright cookie listesini JSON olarak sakla (daha iyi inject)
+    const stored =
+      cookieList && cookieList.length
+        ? JSON.stringify({ header, list: cookieList })
+        : header;
+    await this.patchConfig({ sahibindenCookies: stored });
+    this.lastError = null;
+    logger.info(
+      { cookieCount: cookieList?.length || header.split(";").length },
+      "Sahibinden session cookies saved",
+    );
+  }
+
+  /** Config'ten cookie header + opsiyonel Playwright list */
+  private parseStoredCookies(raw: string): {
+    header: string;
+    list: Array<{
+      name: string;
+      value: string;
+      domain?: string;
+      path?: string;
+      expires?: number;
+      httpOnly?: boolean;
+      secure?: boolean;
+      sameSite?: "Strict" | "Lax" | "None";
+    }>;
+  } {
+    if (!raw?.trim()) return { header: "", list: [] };
+    try {
+      const parsed = JSON.parse(raw) as {
+        header?: string;
+        list?: Array<{
+          name: string;
+          value: string;
+          domain?: string;
+          path?: string;
+          expires?: number;
+          httpOnly?: boolean;
+          secure?: boolean;
+          sameSite?: "Strict" | "Lax" | "None";
+        }>;
+      };
+      if (parsed && (parsed.header || parsed.list)) {
+        return {
+          header: parsed.header || "",
+          list: parsed.list || [],
+        };
+      }
+    } catch {
+      /* plain header string */
+    }
+    return { header: raw, list: [] };
   }
 
   async list(limit: number, offset: number, search?: string) {
@@ -466,9 +539,24 @@ class SahibindenService {
     return { added };
   }
 
-  private async applyCookies(page: Page, cookieHeader: string) {
-    if (!cookieHeader.trim()) return;
-    const cookies = cookieHeader
+  private async applyCookies(page: Page, rawStored: string) {
+    const { header, list } = this.parseStoredCookies(rawStored);
+    if (list.length) {
+      const normalized = list.map((c) => ({
+        name: c.name,
+        value: c.value,
+        domain: c.domain || ".sahibinden.com",
+        path: c.path || "/",
+        expires: c.expires,
+        httpOnly: c.httpOnly,
+        secure: c.secure ?? true,
+        sameSite: c.sameSite || ("Lax" as const),
+      }));
+      await page.context().addCookies(normalized);
+      return;
+    }
+    if (!header.trim()) return;
+    const cookies = header
       .split(";")
       .map((p) => p.trim())
       .filter(Boolean)
@@ -586,7 +674,7 @@ class SahibindenService {
     }
 
     throw new Error(
-      "Sahibinden giriş ekranına yönlendirdi; ilan listesi açılamadı. Cookie ekle (Sahibinden sekmesi) veya SAHIBINDEN_COOKIES env.",
+      "Sahibinden giriş istiyor. Önce Google ile giriş yap: bilgisayarında Sahibinden-Giris.cmd (veya pnpm sahibinden:login). Oturum kaydolunca otomatik çeker.",
     );
   }
 

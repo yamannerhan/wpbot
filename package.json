@@ -15,6 +15,7 @@
     "dev:api": "pnpm --filter @workspace/api-server run dev",
     "dev:web": "pnpm --filter @workspace/whatsapp-bot run dev",
     "sahibinden:bridge": "pnpm --filter @workspace/scripts run sahibinden:bridge",
+    "sahibinden:login": "pnpm --filter @workspace/scripts run sahibinden:login",
     "sahibinden:install": "pnpm --filter @workspace/scripts run sahibinden:install"
   },
   "devDependencies": {

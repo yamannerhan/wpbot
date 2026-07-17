@@ -7,6 +7,7 @@
     "hello": "tsx ./src/hello.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "sahibinden:bridge": "node ./sahibinden-bridge.mjs",
+    "sahibinden:login": "node ./sahibinden-login.mjs",
     "sahibinden:install": "powershell -ExecutionPolicy Bypass -File ./install-sahibinden-autostart.ps1"
   },
   "dependencies": {
