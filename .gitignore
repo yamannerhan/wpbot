@@ -57,3 +57,5 @@ scripts/sahibinden-bridge.log
 scripts/run-sahibinden-bridge.cmd
 
 scripts/sahibinden-watch.log
+
+scripts/.sahibinden-login-profile/
