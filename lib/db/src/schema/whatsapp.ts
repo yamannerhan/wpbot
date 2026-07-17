@@ -57,6 +57,10 @@ export const whatsappConfigTable = pgTable("whatsapp_config", {
   id: integer("id").primaryKey().notNull(),
   selectedGroupIds: text("selected_group_ids").array().notNull().default([]),
   lastFetchAt: timestamp("last_fetch_at"),
+  /** Sahibinden category URL to poll */
+  sahibindenUrl: text("sahibinden_url"),
+  sahibindenLastFetchAt: timestamp("sahibinden_last_fetch_at"),
+  sahibindenListening: boolean("sahibinden_listening").notNull().default(true),
 });
 
 export type WhatsappMessage = typeof whatsappMessagesTable.$inferSelect;

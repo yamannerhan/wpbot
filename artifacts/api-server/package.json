@@ -14,6 +14,7 @@
     "@whiskeysockets/baileys": "7.0.0-rc13",
     "@workspace/api-zod": "workspace:*",
     "@workspace/db": "workspace:*",
+    "cheerio": "^1.1.2",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.6",
     "drizzle-orm": "catalog:",

@@ -2,6 +2,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { ConnectionTab } from '@/components/whatsapp/connection-tab';
 import { GroupsTab } from '@/components/whatsapp/groups-tab';
 import { MessagesTab } from '@/components/whatsapp/messages-tab';
+import { SahibindenTab } from '@/components/whatsapp/sahibinden-tab';
 import { Header } from '@/components/layout/header';
 import { useGetWhatsappStatus, getGetWhatsappStatusQueryKey } from '@workspace/api-client-react';
 
@@ -41,6 +42,12 @@ export default function Dashboard() {
             >
               Mesaj Havuzu
             </TabsTrigger>
+            <TabsTrigger 
+              value="sahibinden" 
+              className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent px-2 sm:px-4 py-3 data-[state=active]:text-primary transition-all whitespace-nowrap"
+            >
+              Sahibinden
+            </TabsTrigger>
           </TabsList>
           
           <div className="flex-1 min-h-0">
@@ -54,6 +61,10 @@ export default function Dashboard() {
             
             <TabsContent value="messages" className="mt-0 outline-none h-full">
               <MessagesTab />
+            </TabsContent>
+
+            <TabsContent value="sahibinden" className="mt-0 outline-none h-full">
+              <SahibindenTab />
             </TabsContent>
           </div>
         </Tabs>

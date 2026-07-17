@@ -25,7 +25,7 @@ import {
   whatsappChatCursorsTable,
   whatsappConfigTable,
 } from "@workspace/db";
-import { eq, desc, sql, gte } from "drizzle-orm";
+import { eq, desc, sql, gte, and, not, like } from "drizzle-orm";
 import pino from "pino";
 import { shouldStorePoolMessage } from "./listing-filter.js";
 import { extractTextFromImage } from "./ocr.js";
@@ -725,7 +725,10 @@ class WhatsAppService {
    * can restore them (WhatsApp rarely re-sends full history after clear).
    */
   async clearPoolOnly(): Promise<{ deleted: number; message: string }> {
-    const snapshot = await db.select().from(whatsappMessagesTable);
+    const snapshot = await db
+      .select()
+      .from(whatsappMessagesTable)
+      .where(not(like(whatsappMessagesTable.groupId, "sahibinden:%")));
     const deleted = snapshot.length;
 
     if (snapshot.length > 0) {
@@ -769,7 +772,9 @@ class WhatsAppService {
       await this.persistCursorsToDb();
     }
 
-    await db.delete(whatsappMessagesTable);
+    await db
+      .delete(whatsappMessagesTable)
+      .where(not(like(whatsappMessagesTable.groupId, "sahibinden:%")));
     this.deepRescanPending = true;
     this.lookbackCompleteByJid.clear();
     // Reset lookback so next scan walks back again (max 15 days / as far as WA allows)
@@ -1522,7 +1527,7 @@ class WhatsAppService {
           : null;
       if (!matchedJid) continue;
 
-      // Media: always label "Medya", OCR image text underneath
+      // Media: store immediately as "Medya", OCR fills text underneath async
       const caption = extractText(msg)?.trim() || "";
       const imageNode = getImageMessageNode(msg);
       const isImageDoc = isImageDocument(msg);
@@ -1535,24 +1540,14 @@ class WhatsAppService {
       );
 
       let text = caption;
+      let needsOcr = false;
 
       if (hasImage) {
-        let ocrText = "";
-        try {
-          ocrText = await this.ocrImageMessage(msg);
-        } catch (err) {
-          logger.warn({ err }, "OCR pipeline error");
-        }
-        const body = ocrText || caption || "(görselden yazı okunamadı)";
-        text = `Medya\n\n${body}`;
-        logger.info(
-          {
-            msgId: msg.key.id,
-            ocrChars: ocrText.length,
-            hasCaption: Boolean(caption),
-          },
-          "Media message processed",
-        );
+        // Don't block the pool on OCR — insert first, enrich after
+        text = caption
+          ? `Medya\n\n${caption}`
+          : "Medya\n\n(yazı ayıklanıyor...)";
+        needsOcr = true;
       } else if (hasOtherMedia && !text) {
         text = "Medya";
       } else if (!text) {
@@ -1587,15 +1582,23 @@ class WhatsAppService {
         : (participant ?? msg.pushName ?? "unknown");
 
       const groupName = await this.getGroupName(matchedJid);
+      const messageId = msg.key.id!;
 
       toInsert.push({
-        messageId: msg.key.id,
+        messageId,
         groupId: matchedJid,
         groupName,
         content,
         sender: String(sender),
         timestamp: msgDate,
       });
+
+      if (needsOcr) {
+        // Background OCR — update pool row when text is ready
+        void this.enrichMediaWithOcr(msg, matchedJid, messageId, caption).catch(
+          (err) => logger.warn({ err, messageId }, "Background OCR failed"),
+        );
+      }
     }
 
     if (toInsert.length === 0) {
@@ -1644,6 +1647,39 @@ class WhatsAppService {
     } catch (err) {
       logger.error({ err }, "Failed to store messages");
     }
+  }
+
+  private async enrichMediaWithOcr(
+    msg: proto.IWebMessageInfo,
+    groupId: string,
+    messageId: string,
+    caption: string,
+  ): Promise<void> {
+    const ocrText = await this.ocrImageMessage(msg);
+    const body = ocrText || caption || "(görselden yazı okunamadı)";
+    const content = normalizeListingContent(`Medya\n\n${body}`);
+    await db
+      .update(whatsappMessagesTable)
+      .set({ content })
+      .where(
+        and(
+          eq(whatsappMessagesTable.messageId, messageId),
+          eq(whatsappMessagesTable.groupId, groupId),
+        ),
+      );
+    await db
+      .update(whatsappMessagesArchiveTable)
+      .set({ content })
+      .where(
+        and(
+          eq(whatsappMessagesArchiveTable.messageId, messageId),
+          eq(whatsappMessagesArchiveTable.groupId, groupId),
+        ),
+      );
+    logger.info(
+      { messageId, ocrChars: ocrText.length },
+      "Media OCR written under Medya",
+    );
   }
 
   private async ocrImageMessage(
@@ -1797,16 +1833,24 @@ function normalizeListingContent(text: string): string {
 function getInnerMessage(
   msg: proto.IWebMessageInfo,
 ): proto.IMessage | null | undefined {
-  const m = msg.message;
+  let m: proto.IMessage | null | undefined = msg.message;
   if (!m) return null;
-  return (
-    m.ephemeralMessage?.message ||
-    m.viewOnceMessage?.message ||
-    m.viewOnceMessageV2?.message ||
-    m.viewOnceMessageV2Extension?.message ||
-    m.documentWithCaptionMessage?.message ||
-    m
-  );
+  // Unwrap nested WA wrappers (ephemeral / view-once / edited / caption doc)
+  for (let i = 0; i < 6; i++) {
+    const cur = m;
+    const next: proto.IMessage | null | undefined =
+      cur.ephemeralMessage?.message ||
+      cur.viewOnceMessage?.message ||
+      cur.viewOnceMessageV2?.message ||
+      cur.viewOnceMessageV2Extension?.message ||
+      cur.documentWithCaptionMessage?.message ||
+      (cur as { editedMessage?: { message?: proto.IMessage } }).editedMessage
+        ?.message ||
+      null;
+    if (!next) break;
+    m = next;
+  }
+  return m;
 }
 
 function getImageMessageNode(

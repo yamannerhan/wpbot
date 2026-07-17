@@ -6,10 +6,12 @@ import {
   SaveSelectedGroupsBody,
   ConnectWhatsappBody,
 } from "@workspace/api-zod";
-import { eq, and, gte, inArray, ilike, sql, desc } from "drizzle-orm";
+import { eq, and, gte, inArray, ilike, sql, desc, not, like } from "drizzle-orm";
 import { whatsappService } from "../lib/whatsapp.js";
 
 const router: IRouter = Router();
+
+const notSahibinden = not(like(whatsappMessagesTable.groupId, "sahibinden:%"));
 
 // GET /whatsapp/status
 router.get("/whatsapp/status", async (req, res): Promise<void> => {
@@ -135,7 +137,7 @@ router.get("/whatsapp/messages", async (req, res): Promise<void> => {
 
   const { groupId, search, limit = 100, offset = 0 } = params.data;
 
-  const conditions = [];
+  const conditions = [notSahibinden];
 
   if (groupId) {
     conditions.push(eq(whatsappMessagesTable.groupId, groupId));
@@ -145,7 +147,7 @@ router.get("/whatsapp/messages", async (req, res): Promise<void> => {
     conditions.push(ilike(whatsappMessagesTable.content, `%${search}%`));
   }
 
-  const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
+  const whereClause = and(...conditions);
 
   const [messages, countResult] = await Promise.all([
     db
@@ -190,7 +192,8 @@ router.get("/whatsapp/messages/stats", async (req, res): Promise<void> => {
   const [totalResult, groupStats, selectedGroupIds] = await Promise.all([
     db
       .select({ count: sql<number>`count(*)` })
-      .from(whatsappMessagesTable),
+      .from(whatsappMessagesTable)
+      .where(notSahibinden),
     db
       .select({
         groupId: whatsappMessagesTable.groupId,
@@ -198,6 +201,7 @@ router.get("/whatsapp/messages/stats", async (req, res): Promise<void> => {
         count: sql<number>`count(*)`,
       })
       .from(whatsappMessagesTable)
+      .where(notSahibinden)
       .groupBy(
         whatsappMessagesTable.groupId,
         whatsappMessagesTable.groupName
