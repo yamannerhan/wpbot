@@ -11,10 +11,14 @@ export const whatsappMessagesTable = pgTable(
     sender: text("sender").notNull(),
     timestamp: timestamp("timestamp").notNull(),
     fetchedAt: timestamp("fetched_at").notNull().defaultNow(),
+    /** null = çeken bot henüz yayınlamadı / sırada */
+    publishedAt: timestamp("published_at"),
   },
   (table) => [
     unique("wa_msg_group_uniq").on(table.messageId, table.groupId),
     index("wa_msg_group_ts_idx").on(table.groupId, table.timestamp),
+    index("wa_msg_published_idx").on(table.publishedAt),
+    index("wa_msg_fetched_idx").on(table.fetchedAt),
   ],
 );
 

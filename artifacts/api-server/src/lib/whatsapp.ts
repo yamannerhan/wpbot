@@ -29,6 +29,7 @@ import { eq, desc, sql, gte, and, not, like } from "drizzle-orm";
 import pino from "pino";
 import { shouldStorePoolMessage } from "./listing-filter.js";
 import { extractTextFromImage } from "./ocr.js";
+import { notifyPublisherForNewRows } from "./publish-notify.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const AUTH_SUFFIX = process.env.NODE_ENV === "development" ? "-dev" : "";
@@ -796,7 +797,7 @@ class WhatsAppService {
     };
   }
 
-  /** Put archived listings back into the pool (15-day window, exact-text unique). */
+  /** Put archived listings back into the pool (15-day window). */
   private async restorePoolFromArchive(): Promise<number> {
     const since = new Date(Date.now() - HISTORY_LOOKBACK_MS);
     const rows = await db
@@ -806,37 +807,20 @@ class WhatsAppService {
 
     if (rows.length === 0) return 0;
 
-    const existing = await db
-      .select({ content: whatsappMessagesTable.content })
-      .from(whatsappMessagesTable);
-    const existingContent = new Set(
-      existing.map((e) => normalizeListingContent(e.content)),
-    );
-
-    const toRestore: Array<{
-      messageId: string;
-      groupId: string;
-      groupName: string;
-      content: string;
-      sender: string;
-      timestamp: Date;
-    }> = [];
-    const batchContents = new Set<string>();
-
-    for (const row of rows) {
-      const content = normalizeListingContent(row.content);
-      if (!content || !shouldStorePoolMessage(content)) continue;
-      if (existingContent.has(content) || batchContents.has(content)) continue;
-      batchContents.add(content);
-      toRestore.push({
+    const toRestore = rows
+      .filter((row) => {
+        const content = normalizeListingContent(row.content);
+        return Boolean(content && shouldStorePoolMessage(content));
+      })
+      .map((row) => ({
         messageId: row.messageId,
         groupId: row.groupId,
         groupName: row.groupName,
-        content,
+        content: normalizeListingContent(row.content),
         sender: row.sender,
         timestamp: row.timestamp,
-      });
-    }
+        fetchedAt: row.fetchedAt ?? new Date(),
+      }));
 
     if (toRestore.length === 0) return 0;
 
@@ -1624,6 +1608,57 @@ class WhatsAppService {
     }
 
     try {
+      // Hangi satırlar gerçekten yeni? (bildirim için — ilk tarama/history hariç)
+      const existingKeys = new Set<string>();
+      if (!isHistory && toInsert.length) {
+        for (const row of toInsert) {
+          const found = await db
+            .select({ id: whatsappMessagesTable.id })
+            .from(whatsappMessagesTable)
+            .where(
+              and(
+                eq(whatsappMessagesTable.messageId, row.messageId),
+                eq(whatsappMessagesTable.groupId, row.groupId),
+              ),
+            )
+            .limit(1);
+          if (found.length) {
+            existingKeys.add(`${row.messageId}|${row.groupId}`);
+          }
+        }
+      }
+      const brandNew = toInsert.filter(
+        (r) => !existingKeys.has(`${r.messageId}|${r.groupId}`),
+      );
+
+      // %100 aynı metin → yayınlama (çift ilan); havuza yine yazılır
+      const exactSeen = new Set<string>();
+      if (!isHistory && brandNew.length && !this.deepRescanPending) {
+        const existingContents = await db
+          .select({ content: whatsappMessagesTable.content })
+          .from(whatsappMessagesTable);
+        for (const e of existingContents) {
+          exactSeen.add(normalizeListingContent(e.content));
+        }
+      }
+      const toNotify: typeof brandNew = [];
+      const exactDupKeys: Array<{ messageId: string; groupId: string }> = [];
+      if (!isHistory && brandNew.length && !this.deepRescanPending) {
+        const batchSeen = new Set<string>();
+        for (const row of brandNew) {
+          const n = normalizeListingContent(row.content);
+          if (!n || exactSeen.has(n) || batchSeen.has(n)) {
+            exactDupKeys.push({
+              messageId: row.messageId,
+              groupId: row.groupId,
+            });
+          } else {
+            batchSeen.add(n);
+            toNotify.push(row);
+          }
+        }
+      }
+
       await db
         .insert(whatsappMessagesTable)
         .values(toInsert)
@@ -1634,7 +1669,8 @@ class WhatsAppService {
           ],
           set: {
             content: sql`excluded.content`,
-            fetchedAt: sql`excluded.fetched_at`,
+            // Sadece içerik değiştiyse (OCR vs) üste taşı — eski mesajı yeniden "yeni" yapma
+            fetchedAt: sql`CASE WHEN ${whatsappMessagesTable.content} IS DISTINCT FROM excluded.content THEN excluded.fetched_at ELSE ${whatsappMessagesTable.fetchedAt} END`,
             groupName: sql`excluded.group_name`,
             sender: sql`excluded.sender`,
           },
@@ -1650,7 +1686,7 @@ class WhatsAppService {
           ],
           set: {
             content: sql`excluded.content`,
-            fetchedAt: sql`excluded.fetched_at`,
+            fetchedAt: sql`CASE WHEN ${whatsappMessagesArchiveTable.content} IS DISTINCT FROM excluded.content THEN excluded.fetched_at ELSE ${whatsappMessagesArchiveTable.fetchedAt} END`,
             groupName: sql`excluded.group_name`,
             sender: sql`excluded.sender`,
           },
@@ -1662,11 +1698,30 @@ class WhatsAppService {
       if (!isHistory) {
         this.lastFetchAt = new Date();
         this.nextFetchAt = new Date(Date.now() + LISTEN_INTERVAL_MS);
+
+        if (exactDupKeys.length) {
+          const { markPublishedByMessageKeys } = await import(
+            "./publish-notify.js"
+          );
+          await markPublishedByMessageKeys(exactDupKeys);
+        }
+
+        // İlk tarama / history / fabrika sıfırlama deep değil → çeken bota bildir
+        if (toNotify.length && !this.deepRescanPending) {
+          const result = await notifyPublisherForNewRows(toNotify);
+          logger.info(
+            { ...result, exactDups: exactDupKeys.length },
+            "Publisher notify after live pool insert",
+          );
+        }
       }
 
       logger.info(
         {
           stored: toInsert.length,
+          brandNew: brandNew.length,
+          toNotify: toNotify.length,
+          exactDups: exactDupKeys.length,
           skippedEmpty,
           skippedNoTs,
           isHistory,

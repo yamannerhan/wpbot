@@ -6,7 +6,7 @@ import {
   SaveSelectedGroupsBody,
   ConnectWhatsappBody,
 } from "@workspace/api-zod";
-import { eq, and, gte, inArray, ilike, sql, desc, not, like } from "drizzle-orm";
+import { eq, and, gte, inArray, ilike, sql, desc, not, like, isNull } from "drizzle-orm";
 import { whatsappService } from "../lib/whatsapp.js";
 
 const router: IRouter = Router();
@@ -168,9 +168,50 @@ router.get("/whatsapp/messages", async (req, res): Promise<void> => {
       ...m,
       timestamp: m.timestamp.toISOString(),
       fetchedAt: m.fetchedAt.toISOString(),
+      publishedAt: m.publishedAt ? m.publishedAt.toISOString() : null,
     })),
     total: Number(countResult[0]?.count ?? 0),
   });
+});
+
+/** Çeken bot: kaldığı yerden sırayla al (id ASC). */
+router.get("/whatsapp/messages/pending", async (req, res): Promise<void> => {
+  const limit = Math.min(Number(req.query.limit) || 50, 200);
+  const afterId = Number(req.query.afterId) || 0;
+  const {
+    listPendingForPublish,
+    countPending,
+  } = await import("../lib/publish-notify.js");
+  const [messages, pendingTotal] = await Promise.all([
+    listPendingForPublish(limit, afterId),
+    countPending(),
+  ]);
+  res.json({
+    messages: messages.map((m) => ({
+      ...m,
+      timestamp: m.timestamp.toISOString(),
+      fetchedAt: m.fetchedAt.toISOString(),
+      publishedAt: null,
+    })),
+    pendingTotal,
+    afterId,
+  });
+});
+
+/** Çeken bot: yayınladıktan sonra işaretle. */
+router.post("/whatsapp/messages/published", async (req, res): Promise<void> => {
+  const ids = Array.isArray(req.body?.ids)
+    ? req.body.ids.map((x: unknown) => Number(x)).filter((n: number) => n > 0)
+    : [];
+  if (!ids.length) {
+    res.status(400).json({ error: "ids required" });
+    return;
+  }
+  const { markPublishedByIds, countPending } = await import(
+    "../lib/publish-notify.js"
+  );
+  await markPublishedByIds(ids);
+  res.json({ ok: true, marked: ids.length, pendingTotal: await countPending() });
 });
 
 // DELETE /whatsapp/messages — only wipe the pool (no auto-rescan)
@@ -189,11 +230,22 @@ router.delete("/whatsapp/messages", async (req, res): Promise<void> => {
 
 // GET /whatsapp/messages/stats
 router.get("/whatsapp/messages/stats", async (req, res): Promise<void> => {
-  const [totalResult, groupStats, selectedGroupIds] = await Promise.all([
+  const [totalResult, pendingResult, publishedResult, groupStats, selectedGroupIds] =
+    await Promise.all([
     db
       .select({ count: sql<number>`count(*)` })
       .from(whatsappMessagesTable)
       .where(notSahibinden),
+    db
+      .select({ count: sql<number>`count(*)` })
+      .from(whatsappMessagesTable)
+      .where(and(notSahibinden, isNull(whatsappMessagesTable.publishedAt))),
+    db
+      .select({ count: sql<number>`count(*)` })
+      .from(whatsappMessagesTable)
+      .where(
+        and(notSahibinden, sql`${whatsappMessagesTable.publishedAt} IS NOT NULL`),
+      ),
     db
       .select({
         groupId: whatsappMessagesTable.groupId,
@@ -220,6 +272,8 @@ router.get("/whatsapp/messages/stats", async (req, res): Promise<void> => {
 
   res.json({
     total: Number(totalResult[0]?.count ?? 0),
+    pending: Number(pendingResult[0]?.count ?? 0),
+    published: Number(publishedResult[0]?.count ?? 0),
     selectedGroupCount: selectedGroupIds.length,
     groups: groupStats.map((g) => ({
       groupId: g.groupId,
@@ -229,6 +283,28 @@ router.get("/whatsapp/messages/stats", async (req, res): Promise<void> => {
     listening: whatsappService.isListening(),
     lastFetchAt: lastFetchAt?.toISOString() ?? null,
     nextFetchAt: nextFetchAt?.toISOString() ?? null,
+  });
+});
+
+/** Bekleyen kuyruğu çeken bota tekrar bildir (havuz arttı ama yayın durduysa). */
+router.post("/whatsapp/messages/wake", async (_req, res): Promise<void> => {
+  const { listPendingForPublish, notifyPublisherForNewRows, countPending } =
+    await import("../lib/publish-notify.js");
+  const pending = await listPendingForPublish(50, 0);
+  const result = await notifyPublisherForNewRows(
+    pending.map((m) => ({
+      messageId: m.messageId,
+      groupId: m.groupId,
+      groupName: m.groupName,
+      content: m.content,
+      sender: m.sender,
+      timestamp: m.timestamp,
+    })),
+  );
+  res.json({
+    ok: true,
+    ...result,
+    pendingTotal: await countPending(),
   });
 });
 

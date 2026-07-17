@@ -1,0 +1,57 @@
+
+> whatsapp-ilan-toplayici@1.0.3 sahibinden:auto C:\Users\ALPARSLAN\Desktop\OTOMATIK ILAN CEKME\yeni bot
+> pnpm --filter @workspace/scripts run sahibinden:auto
+
+(node:7396) [DEP0169] DeprecationWarning: `url.parse()` behavior is not standardized and prone to errors that have security implications. Use the WHATWG URL API instead. CVEs are not issued for `url.parse()` vulnerabilities.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+
+> @workspace/scripts@0.0.0 sahibinden:auto C:\Users\ALPARSLAN\Desktop\OTOMATIK ILAN CEKME\yeni bot\scripts
+> node ./sahibinden-login.mjs --auto
+
+
+=== Sahibinden otomatik çekim ===
+API: https://wpbot-production-cf99.up.railway.app
+
+HATA: İlan bulunamadı (url=https://www.sahibinden.com/cs/checkLoading?returnUrl=https%3A%2F%2Fwww.sahibinden.com%2Fkoruma-guvenlik-guvenlik-gorevlisi-is-ilanlari, title=Bir dakika lütfen...). Giriş eksik veya yanlış sayfa.
+C:\Users\ALPARSLAN\Desktop\OTOMATIK ILAN CEKME\yeni bot\scripts:
+ ERR_PNPM_RECURSIVE_RUN_FIRST_FAIL  @workspace/scripts@0.0.0 sahibinden:auto: `node ./sahibinden-login.mjs --auto`
+Exit status 1
+ ELIFECYCLE  Command failed with exit code 1.
+
+> whatsapp-ilan-toplayici@1.0.3 sahibinden:auto C:\Users\ALPARSLAN\Desktop\OTOMATIK ILAN CEKME\yeni bot
+> pnpm --filter @workspace/scripts run sahibinden:auto
+
+(node:12188) [DEP0169] DeprecationWarning: `url.parse()` behavior is not standardized and prone to errors that have security implications. Use the WHATWG URL API instead. CVEs are not issued for `url.parse()` vulnerabilities.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+
+> @workspace/scripts@0.0.0 sahibinden:auto C:\Users\ALPARSLAN\Desktop\OTOMATIK ILAN CEKME\yeni bot\scripts
+> node ./sahibinden-login.mjs --auto
+
+
+=== Sahibinden otomatik çekim ===
+API: https://wpbot-production-cf99.up.railway.app
+
+HATA: İlan bulunamadı (url=https://www.sahibinden.com/cs/checkLoading?returnUrl=https%3A%2F%2Fwww.sahibinden.com%2Fkoruma-guvenlik-guvenlik-gorevlisi-is-ilanlari, title=Bir dakika lütfen...). Giriş eksik veya yanlış sayfa.
+C:\Users\ALPARSLAN\Desktop\OTOMATIK ILAN CEKME\yeni bot\scripts:
+ ERR_PNPM_RECURSIVE_RUN_FIRST_FAIL  @workspace/scripts@0.0.0 sahibinden:auto: `node ./sahibinden-login.mjs --auto`
+Exit status 1
+ ELIFECYCLE  Command failed with exit code 1.
+
+> whatsapp-ilan-toplayici@1.0.3 sahibinden:auto C:\Users\ALPARSLAN\Desktop\OTOMATIK ILAN CEKME\yeni bot
+> pnpm --filter @workspace/scripts run sahibinden:auto
+
+(node:4500) [DEP0169] DeprecationWarning: `url.parse()` behavior is not standardized and prone to errors that have security implications. Use the WHATWG URL API instead. CVEs are not issued for `url.parse()` vulnerabilities.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+
+> @workspace/scripts@0.0.0 sahibinden:auto C:\Users\ALPARSLAN\Desktop\OTOMATIK ILAN CEKME\yeni bot\scripts
+> node ./sahibinden-login.mjs --auto
+
+
+=== Sahibinden otomatik çekim ===
+API: https://wpbot-production-cf99.up.railway.app
+
+HATA: page.content: Target page, context or browser has been closed
+C:\Users\ALPARSLAN\Desktop\OTOMATIK ILAN CEKME\yeni bot\scripts:
+ ERR_PNPM_RECURSIVE_RUN_FIRST_FAIL  @workspace/scripts@0.0.0 sahibinden:auto: `node ./sahibinden-login.mjs --auto`
+Exit status 3221225786
+ ELIFECYCLE  Command failed with exit code 3221225786.
