@@ -14,15 +14,7 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from '@/components/ui/alert-dialog';
-import {
-  Loader2,
-  History,
-  Trash2,
-  ExternalLink,
-  Clock,
-  Radio,
-  LogIn,
-} from 'lucide-react';
+import { Loader2, History, Trash2, ExternalLink, Clock, Radio, LogIn } from 'lucide-react';
 import { toast } from 'sonner';
 
 const DEFAULT_URL =
@@ -38,7 +30,6 @@ type Status = {
   total: number;
   lastAdded: number;
   lastError: string | null;
-  mode?: string;
   loggedIn?: boolean;
   loginUrl?: string;
 };
@@ -79,7 +70,6 @@ export function SahibindenTab() {
   const [messages, setMessages] = useState<Msg[]>([]);
   const [url, setUrl] = useState(DEFAULT_URL);
   const [loading, setLoading] = useState(true);
-  const [scanning, setScanning] = useState(false);
 
   const refresh = async () => {
     try {
@@ -93,7 +83,7 @@ export function SahibindenTab() {
       if (s?.url) setUrl(s.url);
       setMessages(m?.messages || []);
     } catch {
-      toast.error('Sahibinden durumu alınamadı');
+      toast.error('Durum alınamadı');
     } finally {
       setLoading(false);
     }
@@ -113,36 +103,6 @@ export function SahibindenTab() {
     });
     toast.success('Link kaydedildi');
     refresh();
-  };
-
-  const openLogin = () => {
-    window.open(status?.loginUrl || DEFAULT_LOGIN, '_blank', 'noopener,noreferrer');
-    toast.message('Giriş sayfası açıldı — Google ile giriş yap, sonra PC’de Sahibinden-Giris.cmd çalıştır');
-  };
-
-  const scan = async (deep: boolean) => {
-    setScanning(true);
-    try {
-      const res = await fetch(`${apiBase()}/sahibinden/scan`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ deep }),
-      });
-      const data = await res.json();
-      if (
-        String(data.message || '').includes('hata') ||
-        String(data.message || '').includes('giriş')
-      ) {
-        toast.error(data.message || 'Tarama başarısız');
-      } else {
-        toast.success(data.message || 'Tarama bitti');
-      }
-      await refresh();
-    } catch {
-      toast.error('Tarama başarısız');
-    } finally {
-      setScanning(false);
-    }
   };
 
   const clearPool = async () => {
@@ -173,16 +133,9 @@ export function SahibindenTab() {
           <p className="text-xs text-muted-foreground uppercase font-semibold tracking-wider mb-2">
             Oturum
           </p>
-          <div className="flex items-center gap-2">
-            <div
-              className={`w-3 h-3 rounded-full ${
-                status?.loggedIn ? 'bg-primary' : 'bg-destructive'
-              }`}
-            />
-            <span className="font-semibold">
-              {status?.loggedIn ? 'Girişli' : 'Giriş yok'}
-            </span>
-          </div>
+          <Badge variant={status?.loggedIn ? 'default' : 'destructive'}>
+            {status?.loggedIn ? 'Kayıtlı' : 'Yok'}
+          </Badge>
         </Card>
         <Card className="p-4 border-border/50">
           <div className="flex items-center gap-2 mb-2">
@@ -201,77 +154,50 @@ export function SahibindenTab() {
             </p>
           </div>
           <p className="text-sm font-semibold">
-            {status?.listening ? 'Açık (30 dk)' : 'Kapalı'}
+            {status?.listening ? '30 dk (PC)' : 'Kapalı'}
           </p>
         </Card>
       </div>
 
       <Card className="p-4 border-border/50 space-y-4 shrink-0">
-        <div className="rounded-lg border border-primary/30 bg-primary/5 p-4 space-y-3">
-          <p className="font-semibold text-foreground">
-            1) İlk giriş (bir kez, elle — Google)
+        <div className="rounded-lg border border-primary/30 bg-primary/5 p-4 space-y-2">
+          <p className="font-semibold flex items-center gap-2">
+            <LogIn className="w-4 h-4" />
+            Nasıl çalışır?
           </p>
-          <p className="text-sm text-muted-foreground">
-            Sahibinden bot IP&apos;sine giriş zorunlu tutuyor. Sen bir kez Google ile
-            giriş yap; oturum Railway&apos;e kaydolur. Sonrası özel güvenlik ilanlarını
-            sunucu Chromium ile 30 dk&apos;da bir otomatik çeker — ekranında tarayıcı
-            açılmaz.
-          </p>
-          <div className="flex flex-wrap gap-2">
-            <Button onClick={openLogin} className="gap-2">
-              <LogIn className="w-4 h-4" />
-              Sahibinden Giriş Sayfasını Aç
-            </Button>
-            <Button variant="secondary" asChild>
-              <a
-                href={status?.loginUrl || DEFAULT_LOGIN}
-                target="_blank"
-                rel="noreferrer"
-              >
-                Yeni sekmede aç
-              </a>
-            </Button>
-          </div>
           <ol className="text-sm text-muted-foreground list-decimal pl-5 space-y-1">
-            <li>Yukarıdan giriş sayfasını aç → <strong>Google ile giriş yap</strong></li>
             <li>
-              Masaüstündeki proje klasöründe <code className="text-foreground">Sahibinden-Giris.cmd</code> dosyasına çift tıkla
-              (Chrome açılır, girişini algılar, oturumu sunucuya yollar)
+              Projede <code className="text-foreground">Sahibinden-Giris.cmd</code> çift tıkla
             </li>
+            <li>Açılan Chrome&apos;da <strong>Google ile giriş</strong> yap</li>
             <li>
-              Veya: <code className="text-foreground">pnpm sahibinden:login</code>
+              Güvenlik görevlisi <strong>ilan listesini görünce</strong> siyah pencerede{' '}
+              <strong>Enter</strong>&apos;a bas
             </li>
-            <li>Oturum: <strong>{status?.loggedIn ? 'Girişli ✓' : 'Henüz yok'}</strong></li>
+            <li>İlanlar buraya düşer; sonrası PC açıkken 30 dk&apos;da bir otomatik</li>
           </ol>
+          <p className="text-xs text-muted-foreground">
+            Not: Railway sunucu IP&apos;si ilan listesini göremez. Çekim senin bilgisayarındaki
+            girişli Chrome oturumuyla yapılır; panelde sadece sonuç görünür.
+          </p>
+          <Button asChild variant="secondary" size="sm">
+            <a href={status?.loginUrl || DEFAULT_LOGIN} target="_blank" rel="noreferrer">
+              Giriş sayfasını tarayıcıda aç
+            </a>
+          </Button>
         </div>
 
         <div className="flex flex-col md:flex-row gap-2">
-          <Input
-            value={url}
-            onChange={(e) => setUrl(e.target.value)}
-            placeholder={DEFAULT_URL}
-            className="flex-1"
-          />
+          <Input value={url} onChange={(e) => setUrl(e.target.value)} className="flex-1" />
           <Button variant="secondary" onClick={saveUrl}>
             Linki Kaydet
           </Button>
         </div>
 
         <div className="flex flex-wrap gap-2">
-          <Button
-            onClick={() => scan(true)}
-            disabled={scanning || !status?.loggedIn}
-            className="gap-2"
-          >
-            {scanning ? <Loader2 className="w-4 h-4 animate-spin" /> : <History className="w-4 h-4" />}
-            Yeniden Tara (15 gün)
-          </Button>
-          <Button
-            variant="outline"
-            onClick={() => scan(false)}
-            disabled={scanning || !status?.loggedIn}
-          >
-            Hızlı Tara
+          <Button variant="outline" onClick={refresh} className="gap-2">
+            <History className="w-4 h-4" />
+            Listeyi Yenile
           </Button>
           <AlertDialog>
             <AlertDialogTrigger asChild>
@@ -282,24 +208,19 @@ export function SahibindenTab() {
             </AlertDialogTrigger>
             <AlertDialogContent>
               <AlertDialogHeader>
-                <AlertDialogTitle>Sahibinden havuzunu temizle?</AlertDialogTitle>
+                <AlertDialogTitle>Temizle?</AlertDialogTitle>
                 <AlertDialogDescription>
-                  İlanlar silinir; oturum durursa tekrar Sahibinden-Giris.cmd ile giriş
-                  gerekir.
+                  Sahibinden ilanları silinir. Tekrar çekmek için Sahibinden-Giris.cmd veya
+                  otomatik görev gerekir.
                 </AlertDialogDescription>
               </AlertDialogHeader>
               <AlertDialogFooter>
                 <AlertDialogCancel>İptal</AlertDialogCancel>
-                <AlertDialogAction onClick={clearPool}>Evet, Temizle</AlertDialogAction>
+                <AlertDialogAction onClick={clearPool}>Evet</AlertDialogAction>
               </AlertDialogFooter>
             </AlertDialogContent>
           </AlertDialog>
         </div>
-        {!status?.loggedIn && (
-          <p className="text-sm text-amber-600 dark:text-amber-400">
-            Önce Google girişini tamamla (Sahibinden-Giris.cmd). Sonra tarama açılır.
-          </p>
-        )}
         {status?.lastError && (
           <p className="text-sm text-destructive whitespace-pre-wrap">{status.lastError}</p>
         )}
@@ -309,10 +230,8 @@ export function SahibindenTab() {
         <div className="flex-1 overflow-y-auto p-3 md:p-5 space-y-3">
           {messages.length === 0 ? (
             <div className="text-center text-muted-foreground py-16">
-              <p>Henüz Sahibinden ilanı yok.</p>
-              <p className="text-sm mt-2 opacity-70">
-                Giriş yap → oturum kaydolunca özel güvenlik ilanları buraya düşer.
-              </p>
+              <p>Henüz ilan yok.</p>
+              <p className="text-sm mt-2">Sahibinden-Giris.cmd → Google giriş → Enter</p>
             </div>
           ) : (
             messages.map((msg) => (

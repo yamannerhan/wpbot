@@ -670,11 +670,16 @@ class SahibindenService {
       }
 
       if (parseCards(html).length > 0) return html;
-      if (!isLoginHtml(html, url) && html.length > 15000) return html;
+      // Boş büyük sayfa = soft block / yanlış içerik — başarı sayma
+      const title = await page.title().catch(() => "");
+      logger.warn(
+        { url, title, htmlLen: html.length, cards: 0 },
+        "Sahibinden liste boş döndü",
+      );
     }
 
     throw new Error(
-      "Sahibinden giriş istiyor. Önce Google ile giriş yap: bilgisayarında Sahibinden-Giris.cmd (veya pnpm sahibinden:login). Oturum kaydolunca otomatik çeker.",
+      "İlan listesi boş (Railway IP engelli olabilir). Bilgisayarında Sahibinden-Giris.cmd ile Google giriş yapıp Enter'a bas — çekim ev IP ile yapılır.",
     );
   }
 

@@ -23,12 +23,13 @@ router.post("/sahibinden/cookies", async (req, res): Promise<void> => {
     ? req.body.cookieList
     : undefined;
   await sahibindenService.setCookies(cookies, cookieList);
-  // Giriş kaydı sonrası otomatik dinleme + tarama
   await sahibindenService.enableListen();
-  void sahibindenService.scan({ deep: true }).catch(() => undefined);
+  // Railway Chromium çoğu zaman IP yüzünden listeyi göremez —
+  // asıl çekim yerel Sahibinden-Giris / --auto ile ingest edilir.
   res.json({
     ok: true,
-    message: "Oturum kaydedildi. Ozel guvenlik ilanlari otomatik cekilecek.",
+    message:
+      "Oturum kaydedildi. İlanlar bilgisayarındaki Chrome oturumuyla çekilip havuza yazılacak.",
     ...(await sahibindenService.getStatus()),
   });
 });
