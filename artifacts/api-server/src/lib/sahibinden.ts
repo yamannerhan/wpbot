@@ -1,5 +1,5 @@
 import * as cheerio from "cheerio";
-import { ProxyAgent, fetch as undiciFetch, type Dispatcher } from "undici";
+import { chromium, type Browser, type Page } from "playwright";
 import { db } from "@workspace/db";
 import {
   whatsappMessagesTable,
@@ -13,14 +13,10 @@ const DEFAULT_URL =
   "https://www.sahibinden.com/koruma-guvenlik-guvenlik-gorevlisi-is-ilanlari";
 const GENERAL_URL =
   "https://www.sahibinden.com/koruma-guvenlik-is-ilanlari";
-const HOME_URL = "https://www.sahibinden.com/";
 const LOOKBACK_MS = 15 * 24 * 60 * 60 * 1000;
 const POLL_MS = 30 * 60 * 1000;
 const GROUP_ID = "sahibinden:guvenlik";
 const GROUP_NAME = "Sahibinden";
-
-const CHROME_UA =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
 type ListingCard = {
   id: string;
@@ -39,15 +35,14 @@ type Status = {
   total: number;
   lastAdded: number;
   lastError: string | null;
-  hasProxy: boolean;
-  hasCookies: boolean;
+  mode: "chromium";
 };
 
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-function humanDelay(min = 2200, max = 5200) {
+function humanDelay(min = 1200, max = 2800) {
   return sleep(min + Math.floor(Math.random() * (max - min)));
 }
 
@@ -102,57 +97,101 @@ function extractPhone(text: string): string | null {
   return m ? m[0].replace(/\s+/g, " ").trim() : null;
 }
 
-function parseCookieHeader(raw: string): Map<string, string> {
-  const jar = new Map<string, string>();
-  if (!raw?.trim()) return jar;
-  for (const part of raw.split(";")) {
-    const idx = part.indexOf("=");
-    if (idx <= 0) continue;
-    const name = part.slice(0, idx).trim();
-    const value = part.slice(idx + 1).trim();
-    if (!name || name.toLowerCase() === "path" || name.toLowerCase() === "domain")
-      continue;
-    if (/expires|max-age|secure|httponly|samesite/i.test(name)) continue;
-    jar.set(name, value);
+function parseCards(html: string): ListingCard[] {
+  const $ = cheerio.load(html);
+  const out: ListingCard[] = [];
+  const seen = new Set<string>();
+
+  $("tr.searchResultsItem, tr[data-id], .searchResultsItem").each((_, el) => {
+    const row = $(el);
+    const a =
+      row.find("a.classifiedTitle").first().length > 0
+        ? row.find("a.classifiedTitle").first()
+        : row.find("a[href*='/ilan/']").first();
+    const href = a.attr("href") || "";
+    if (!href.includes("/ilan/")) return;
+    const full = href.startsWith("http")
+      ? href
+      : `https://www.sahibinden.com${href}`;
+    const idMatch = full.match(/-(\d+)(?:\/|$)/) || full.match(/\/(\d{6,})/);
+    const id =
+      row.attr("data-id") ||
+      idMatch?.[1] ||
+      full.replace(/\W/g, "").slice(-12);
+    if (!id || seen.has(id)) return;
+    seen.add(id);
+
+    const title = a.text().replace(/\s+/g, " ").trim();
+    const dateText = row
+      .find(".searchResultsDateValue, td.searchResultsDateValue")
+      .first()
+      .text()
+      .replace(/\s+/g, " ")
+      .trim();
+    const location = row
+      .find(".searchResultsLocationValue, td.searchResultsLocationValue")
+      .first()
+      .text()
+      .replace(/\s+/g, " ")
+      .trim();
+
+    out.push({
+      id: String(id),
+      title,
+      url: full.split("?")[0]!,
+      dateText,
+      date: parseTrDate(dateText),
+      location,
+    });
+  });
+
+  if (out.length === 0) {
+    $('a[href*="/ilan/"]').each((_, el) => {
+      const href = $(el).attr("href") || "";
+      if (!/is-ilanlari|guvenlik|ilan/i.test(href)) return;
+      const full = href.startsWith("http")
+        ? href
+        : `https://www.sahibinden.com${href}`;
+      const idMatch = full.match(/-(\d+)(?:\/|$)/);
+      const id = idMatch?.[1];
+      if (!id || seen.has(id)) return;
+      seen.add(id);
+      out.push({
+        id,
+        title: $(el).text().replace(/\s+/g, " ").trim() || `İlan ${id}`,
+        url: full.split("?")[0]!,
+        dateText: "",
+        date: new Date(),
+        location: "",
+      });
+    });
   }
-  return jar;
+
+  return out;
 }
 
-function mergeSetCookies(jar: Map<string, string>, headers: Headers) {
-  const raw =
-    typeof headers.getSetCookie === "function"
-      ? headers.getSetCookie()
-      : [];
-  for (const line of raw) {
-    const first = line.split(";")[0] || "";
-    const idx = first.indexOf("=");
-    if (idx <= 0) continue;
-    jar.set(first.slice(0, idx).trim(), first.slice(idx + 1).trim());
-  }
+function isLoginUrl(url: string) {
+  return /\/giris|secure\.sahibinden\.com\/giris/i.test(url);
 }
 
-function chromeHeaders(referer?: string, cookieHeader?: string): Record<string, string> {
-  const h: Record<string, string> = {
-    "User-Agent": CHROME_UA,
-    Accept:
-      "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-    "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Cache-Control": "max-age=0",
-    "Sec-Ch-Ua":
-      '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
-    "Sec-Ch-Ua-Mobile": "?0",
-    "Sec-Ch-Ua-Platform": '"Windows"',
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": referer ? "same-origin" : "none",
-    "Sec-Fetch-User": "?1",
-    "Upgrade-Insecure-Requests": "1",
-    Connection: "keep-alive",
-  };
-  if (referer) h.Referer = referer;
-  if (cookieHeader) h.Cookie = cookieHeader;
-  return h;
+function isLoginHtml(html: string, url: string) {
+  if (isLoginUrl(url)) return true;
+  return (
+    /giriş yapmanız gerekmektedir|e-posta ile giriş|qr ile giriş/i.test(
+      html.slice(0, 8000),
+    ) && !/searchResultsItem|classifiedTitle/i.test(html)
+  );
+}
+
+function isChallenge(title: string, html: string) {
+  const t = `${title} ${html.slice(0, 4000)}`.toLowerCase();
+  return (
+    t.includes("bir dakika") ||
+    t.includes("just a moment") ||
+    t.includes("cf-challenge") ||
+    t.includes("challenge-platform") ||
+    t.includes("turnstile")
+  );
 }
 
 class SahibindenService {
@@ -161,20 +200,7 @@ class SahibindenService {
   private nextFetchAt: Date | null = null;
   private lastAdded = 0;
   private lastError: string | null = null;
-  private cookieJar = new Map<string, string>();
-  private warmedUp = false;
-  private dispatcher: Dispatcher | undefined;
-
-  constructor() {
-    const proxy =
-      process.env.SAHIBINDEN_PROXY?.trim() ||
-      process.env.HTTPS_PROXY?.trim() ||
-      process.env.HTTP_PROXY?.trim();
-    if (proxy) {
-      this.dispatcher = new ProxyAgent(proxy);
-      logger.info("Sahibinden proxy enabled");
-    }
-  }
+  private browser: Browser | null = null;
 
   async start(): Promise<void> {
     const cfg = await this.getConfig();
@@ -186,10 +212,10 @@ class SahibindenService {
         logger.error({ err }, "Sahibinden scheduled scan failed"),
       );
     }, POLL_MS);
-    logger.info("Sahibinden listening ON — every 30 minutes");
+    logger.info("Sahibinden Chromium listening ON — every 30 minutes");
     setTimeout(() => {
       this.scan({ deep: false }).catch(() => undefined);
-    }, 8000);
+    }, 12000);
   }
 
   private stopTimerOnly() {
@@ -202,12 +228,35 @@ class SahibindenService {
   async stop(): Promise<void> {
     this.stopTimerOnly();
     this.nextFetchAt = null;
+    await this.closeBrowser();
     await this.patchConfig({ sahibindenListening: false });
   }
 
   async enableListen(): Promise<void> {
     await this.patchConfig({ sahibindenListening: true });
     await this.start();
+  }
+
+  private async closeBrowser() {
+    if (this.browser) {
+      await this.browser.close().catch(() => undefined);
+      this.browser = null;
+    }
+  }
+
+  private async getBrowser(): Promise<Browser> {
+    if (this.browser?.isConnected()) return this.browser;
+    this.browser = await chromium.launch({
+      headless: true,
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-blink-features=AutomationControlled",
+        "--window-size=1366,768",
+      ],
+    });
+    return this.browser;
   }
 
   async getConfig(): Promise<{
@@ -247,8 +296,7 @@ class SahibindenService {
       total: Number(count || 0),
       lastAdded: this.lastAdded,
       lastError: this.lastError,
-      hasProxy: Boolean(this.dispatcher),
-      hasCookies: Boolean(cfg.cookies || this.cookieJar.size),
+      mode: "chromium",
     };
   }
 
@@ -298,15 +346,11 @@ class SahibindenService {
   }
 
   async setUrl(url: string) {
-    const clean = url.trim();
-    await this.patchConfig({ sahibindenUrl: clean });
-    this.warmedUp = false;
+    await this.patchConfig({ sahibindenUrl: url.trim() });
   }
 
   async setCookies(cookies: string) {
     await this.patchConfig({ sahibindenCookies: cookies.trim() });
-    this.cookieJar = parseCookieHeader(cookies);
-    this.warmedUp = false;
   }
 
   async list(limit: number, offset: number, search?: string) {
@@ -356,11 +400,10 @@ class SahibindenService {
 
     return {
       deleted: existing.length,
-      message: `Sahibinden havuzu temizlendi (${existing.length}). Son 15 gün yeniden taranıyor; dinleme açık.`,
+      message: `Sahibinden havuzu temizlendi (${existing.length}). Chromium ile son 15 gün taranıyor.`,
     };
   }
 
-  /** Ingest listings scraped from a home-PC bridge (residential IP). */
   async ingestListings(
     items: Array<{
       id: string;
@@ -423,6 +466,261 @@ class SahibindenService {
     return { added };
   }
 
+  private async applyCookies(page: Page, cookieHeader: string) {
+    if (!cookieHeader.trim()) return;
+    const cookies = cookieHeader
+      .split(";")
+      .map((p) => p.trim())
+      .filter(Boolean)
+      .map((part) => {
+        const i = part.indexOf("=");
+        if (i <= 0) return null;
+        return {
+          name: part.slice(0, i).trim(),
+          value: part.slice(i + 1).trim(),
+          domain: ".sahibinden.com",
+          path: "/",
+        };
+      })
+      .filter(Boolean) as Array<{
+      name: string;
+      value: string;
+      domain: string;
+      path: string;
+    }>;
+    if (cookies.length) {
+      await page.context().addCookies(cookies);
+    }
+  }
+
+  private async clickCloudflare(page: Page) {
+    const frames = [
+      'iframe[src*="challenges.cloudflare.com"]',
+      'iframe[src*="turnstile"]',
+      'iframe[id*="cf-chl-widget"]',
+    ];
+    for (const sel of frames) {
+      try {
+        const box = page
+          .frameLocator(sel)
+          .locator('input[type="checkbox"], .cb-i, label.cb-lb')
+          .first();
+        if ((await box.count()) > 0) {
+          await box.click({ timeout: 4000, force: true });
+          await sleep(2000);
+          return true;
+        }
+      } catch {
+        /* next */
+      }
+    }
+    try {
+      const stage = page.locator("#challenge-stage, .cf-turnstile").first();
+      if ((await stage.count()) > 0) {
+        const b = await stage.boundingBox();
+        if (b) {
+          await page.mouse.click(b.x + 28, b.y + b.height / 2);
+          await sleep(2000);
+          return true;
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+    return false;
+  }
+
+  /** Doğrudan ilan listesine git — giriş sayfasına düşerse tekrar dene, login yapma. */
+  private async openListingPage(page: Page, listUrl: string): Promise<string> {
+    const attempts = [
+      listUrl,
+      // Google referer ile tekrar (giriş duvarını azaltır)
+      listUrl,
+      listUrl.includes("?")
+        ? `${listUrl}&pagingOffset=0`
+        : `${listUrl}?pagingOffset=0`,
+    ];
+
+    for (let i = 0; i < attempts.length; i++) {
+      const target = attempts[i]!;
+      await page.goto(target, {
+        waitUntil: "domcontentloaded",
+        timeout: 90000,
+        referer:
+          i === 0
+            ? undefined
+            : "https://www.google.com/",
+      });
+      await humanDelay();
+
+      // CF
+      for (let w = 0; w < 20; w++) {
+        const title = await page.title().catch(() => "");
+        const html = await page.content().catch(() => "");
+        if (!isChallenge(title, html)) break;
+        await this.clickCloudflare(page);
+        await sleep(2000);
+      }
+
+      let url = page.url();
+      let html = await page.content();
+
+      // Giriş ekranı geldiyse — login YAPMA, doğrudan kategoriye zorla
+      if (isLoginHtml(html, url)) {
+        logger.warn({ url }, "Sahibinden giriş sayfasına düştü — tekrar kategori");
+        await page.goto(listUrl, {
+          waitUntil: "domcontentloaded",
+          timeout: 90000,
+          referer: "https://www.google.com/search?q=sahibinden+guvenlik+gorevlisi",
+        });
+        await humanDelay(2000, 3500);
+        url = page.url();
+        html = await page.content();
+        if (isLoginHtml(html, url)) {
+          continue; // next attempt
+        }
+      }
+
+      if (parseCards(html).length > 0) return html;
+      if (!isLoginHtml(html, url) && html.length > 15000) return html;
+    }
+
+    throw new Error(
+      "Sahibinden giriş ekranına yönlendirdi; ilan listesi açılamadı. Cookie ekle (Sahibinden sekmesi) veya SAHIBINDEN_COOKIES env.",
+    );
+  }
+
+  private async fetchListingCards(
+    page: Page,
+    listUrl: string,
+    maxPages: number,
+  ): Promise<ListingCard[]> {
+    const out: ListingCard[] = [];
+    const seen = new Set<string>();
+
+    for (let pageNo = 1; pageNo <= maxPages; pageNo++) {
+      const url =
+        pageNo === 1
+          ? listUrl
+          : `${listUrl}${listUrl.includes("?") ? "&" : "?"}pagingOffset=${(pageNo - 1) * 20}`;
+      const html =
+        pageNo === 1
+          ? await this.openListingPage(page, url)
+          : await (async () => {
+              await page.goto(url, {
+                waitUntil: "domcontentloaded",
+                timeout: 90000,
+                referer: listUrl,
+              });
+              await humanDelay();
+              if (isLoginHtml(await page.content(), page.url())) {
+                return "";
+              }
+              return page.content();
+            })();
+
+      if (!html) break;
+      for (const c of parseCards(html)) {
+        if (seen.has(c.id)) continue;
+        seen.add(c.id);
+        out.push(c);
+      }
+      if (out.length === 0 && pageNo === 1) break;
+    }
+    return out;
+  }
+
+  private async fetchDetail(
+    page: Page,
+    card: ListingCard,
+  ): Promise<{
+    title: string;
+    body: string;
+    phone: string | null;
+    seller: string;
+    location: string;
+    date: Date | null;
+    url: string;
+  } | null> {
+    try {
+      await page.goto(card.url, {
+        waitUntil: "domcontentloaded",
+        timeout: 90000,
+        referer: DEFAULT_URL,
+      });
+      await humanDelay(800, 1800);
+      const html = await page.content();
+      if (isLoginHtml(html, page.url())) {
+        // Detay için login istemesin — kart bilgisini kullan
+        return {
+          title: card.title,
+          body: "",
+          phone: null,
+          seller: "Sahibinden",
+          location: card.location,
+          date: card.date,
+          url: card.url,
+        };
+      }
+      const $ = cheerio.load(html);
+      const title =
+        $("h1").first().text().replace(/\s+/g, " ").trim() || card.title;
+      const infoLines: string[] = [];
+      $(".classifiedInfoList li, ul.classifiedInfoList li").each((_, el) => {
+        const t = $(el).text().replace(/\s+/g, " ").trim();
+        if (t) infoLines.push(t);
+      });
+      const desc =
+        $("#classifiedDescription, .classifiedDescription")
+          .first()
+          .text()
+          .replace(/\s+/g, " ")
+          .trim() || "";
+      const seller =
+        $(".username-info-area h5, .user-info h5")
+          .first()
+          .text()
+          .replace(/\s+/g, " ")
+          .trim() || "Sahibinden";
+      let phone =
+        $(".pretty-phone-part, #phoneInfo span")
+          .first()
+          .text()
+          .replace(/\s+/g, " ")
+          .trim() || null;
+      if (!phone) phone = extractPhone(html) || extractPhone(desc);
+      const dateFromInfo =
+        infoLines.find((l) => /ilan tarihi/i.test(l)) || card.dateText;
+      const date =
+        parseTrDate(dateFromInfo.replace(/ilan tarihi[:\s]*/i, "")) ||
+        card.date;
+      const location =
+        infoLines
+          .find((l) => /il\s*\/\s*ilçe|il \/ ilce/i.test(l))
+          ?.replace(/.*?:\s*/i, "") || card.location;
+      return {
+        title,
+        body: [infoLines.join("\n"), "", desc].filter(Boolean).join("\n"),
+        phone,
+        seller,
+        location,
+        date,
+        url: card.url,
+      };
+    } catch (err) {
+      logger.warn({ err, url: card.url }, "Sahibinden detail failed");
+      return {
+        title: card.title,
+        body: "",
+        phone: null,
+        seller: "Sahibinden",
+        location: card.location,
+        date: card.date,
+        url: card.url,
+      };
+    }
+  }
+
   async scan(opts?: { deep?: boolean }): Promise<{
     added: number;
     scanned: number;
@@ -441,14 +739,37 @@ class SahibindenService {
     const since = new Date(Date.now() - LOOKBACK_MS);
     let added = 0;
     let scanned = 0;
+    let context = null as Awaited<
+      ReturnType<Browser["newContext"]>
+    > | null;
 
     try {
-      await this.ensureSession();
       const cfg = await this.getConfig();
+      const browser = await this.getBrowser();
+      context = await browser.newContext({
+        locale: "tr-TR",
+        timezoneId: "Europe/Istanbul",
+        viewport: { width: 1366, height: 768 },
+        userAgent:
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        extraHTTPHeaders: {
+          "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
+        },
+      });
+      await context.addInitScript(() => {
+        Object.defineProperty(navigator, "webdriver", { get: () => undefined });
+      });
+      const page = await context.newPage();
+      await this.applyCookies(page, cfg.cookies);
+
       const urls = Array.from(new Set([cfg.url || DEFAULT_URL, GENERAL_URL]));
 
       for (const listUrl of urls) {
-        const cards = await this.fetchListingCards(listUrl, deep ? 8 : 3);
+        const cards = await this.fetchListingCards(
+          page,
+          listUrl,
+          deep ? 8 : 3,
+        );
         for (const card of cards) {
           scanned++;
           if (card.date && card.date < since) continue;
@@ -464,8 +785,8 @@ class SahibindenService {
             .limit(1);
           if (exists.length) continue;
 
-          await humanDelay();
-          const detail = await this.fetchDetail(card);
+          await humanDelay(900, 2000);
+          const detail = await this.fetchDetail(page, card);
           if (!detail) continue;
           if (detail.date && detail.date < since) continue;
 
@@ -510,280 +831,27 @@ class SahibindenService {
         }
       }
 
-      const now = new Date();
-      await this.patchConfig({ sahibindenLastFetchAt: now });
+      await this.patchConfig({ sahibindenLastFetchAt: new Date() });
       this.nextFetchAt = new Date(Date.now() + POLL_MS);
       this.lastAdded = added;
 
       const msg = deep
-        ? `Sahibinden derin tarama: ${scanned} ilan bakıldı, ${added} eklendi (max 15 gün). Dinleme açık.`
-        : `Sahibinden: ${scanned} ilan bakıldı, ${added} yeni eklendi. 30 dk'da bir dinleniyor.`;
+        ? `Chromium tarama: ${scanned} bakıldı, ${added} eklendi (max 15 gün).`
+        : `Chromium: ${scanned} bakıldı, ${added} yeni. 30 dk dinlemede.`;
 
-      logger.info({ added, scanned, deep }, "Sahibinden scan done");
+      logger.info({ added, scanned, deep }, "Sahibinden Chromium scan done");
       return { added, scanned, message: msg };
     } catch (err) {
       this.lastError = err instanceof Error ? err.message : String(err);
-      logger.error({ err }, "Sahibinden scan failed");
+      logger.error({ err }, "Sahibinden Chromium scan failed");
       return {
         added,
         scanned,
         message: `Sahibinden tarama hatası: ${this.lastError}`,
       };
     } finally {
+      await context?.close().catch(() => undefined);
       this.running = false;
-    }
-  }
-
-  private cookieHeader(): string {
-    return Array.from(this.cookieJar.entries())
-      .map(([k, v]) => `${k}=${v}`)
-      .join("; ");
-  }
-
-  private async ensureSession() {
-    const cfg = await this.getConfig();
-    if (cfg.cookies && this.cookieJar.size === 0) {
-      this.cookieJar = parseCookieHeader(cfg.cookies);
-    }
-    if (this.warmedUp && this.cookieJar.size > 0) return;
-
-    // Human path: open homepage first, wait, then continue
-    await this.fetchHtml(HOME_URL, undefined, { allowSoftFail: true });
-    await humanDelay(1500, 3200);
-    await this.fetchHtml(
-      "https://www.sahibinden.com/is-ilanlari",
-      HOME_URL,
-      { allowSoftFail: true },
-    );
-    await humanDelay(1200, 2800);
-    this.warmedUp = true;
-  }
-
-  private blockHint(status: number): string {
-    const hasProxy = Boolean(this.dispatcher);
-    if (status === 403 || status === 429 || status === 503) {
-      if (!hasProxy) {
-        return (
-          `Sahibinden sunucu IP'sini engelledi (HTTP ${status}). ` +
-          `Railway veri merkezi IP'si bot sanılıyor. Çözüm: Railway'e Türk ev/residential proxy ekle ` +
-          `(SAHIBINDEN_PROXY) veya bilgisayarında yerel köprü çalıştır: pnpm sahibinden:bridge`
-        );
-      }
-      return `Sahibinden HTTP ${status} — proxy/cookie geçersiz veya banlı olabilir. Cookie yenile veya başka proxy dene.`;
-    }
-    return `HTTP ${status}`;
-  }
-
-  private async fetchHtml(
-    url: string,
-    referer?: string,
-    opts?: { allowSoftFail?: boolean },
-  ): Promise<string> {
-    const cookie = this.cookieHeader();
-    const res = await undiciFetch(url, {
-      method: "GET",
-      headers: chromeHeaders(referer, cookie || undefined),
-      redirect: "follow",
-      dispatcher: this.dispatcher,
-    });
-
-    mergeSetCookies(this.cookieJar, res.headers as unknown as Headers);
-
-    if (!res.ok) {
-      const hint = this.blockHint(res.status);
-      if (opts?.allowSoftFail) {
-        logger.warn({ url, status: res.status }, "Sahibinden soft-fail fetch");
-        return "";
-      }
-      throw new Error(`${hint} — ${url}`);
-    }
-
-    const html = await res.text();
-    if (
-      /cloudflare|captcha|access denied|just a moment/i.test(html) &&
-      html.length < 8000
-    ) {
-      throw new Error(
-        this.blockHint(403) + " (Cloudflare/captcha sayfası döndü)",
-      );
-    }
-    if (/sahibinden\.com\/giris/i.test(res.url) || /\/giris\b/i.test(html.slice(0, 2000))) {
-      throw new Error(
-        "Sahibinden giriş sayfasına yönlendirdi. Chrome'dan cookie yapıştırın veya residential proxy kullanın.",
-      );
-    }
-    return html;
-  }
-
-  private async fetchListingCards(
-    listUrl: string,
-    maxPages: number,
-  ): Promise<ListingCard[]> {
-    const out: ListingCard[] = [];
-    const seen = new Set<string>();
-
-    for (let page = 1; page <= maxPages; page++) {
-      const url =
-        page === 1
-          ? listUrl
-          : `${listUrl}${listUrl.includes("?") ? "&" : "?"}pagingOffset=${(page - 1) * 20}`;
-      if (page > 1) await humanDelay(2800, 6000);
-      const html = await this.fetchHtml(
-        url,
-        page === 1 ? "https://www.sahibinden.com/is-ilanlari" : listUrl,
-      );
-      if (!html) break;
-      const $ = cheerio.load(html);
-
-      $("tr.searchResultsItem, tr[data-id], .searchResultsItem").each(
-        (_, el) => {
-          const row = $(el);
-          const a =
-            row.find("a.classifiedTitle").first().length > 0
-              ? row.find("a.classifiedTitle").first()
-              : row.find("a[href*='/ilan/']").first();
-          const href = a.attr("href") || "";
-          if (!href.includes("/ilan/")) return;
-          const full = href.startsWith("http")
-            ? href
-            : `https://www.sahibinden.com${href}`;
-          const idMatch =
-            full.match(/-(\d+)(?:\/|$)/) || full.match(/\/(\d{6,})/);
-          const id =
-            row.attr("data-id") ||
-            idMatch?.[1] ||
-            full.replace(/\W/g, "").slice(-12);
-          if (!id || seen.has(id)) return;
-          seen.add(id);
-
-          const title = a.text().replace(/\s+/g, " ").trim();
-          const dateText = row
-            .find(".searchResultsDateValue, td.searchResultsDateValue")
-            .first()
-            .text()
-            .replace(/\s+/g, " ")
-            .trim();
-          const location = row
-            .find(
-              ".searchResultsLocationValue, td.searchResultsLocationValue",
-            )
-            .first()
-            .text()
-            .replace(/\s+/g, " ")
-            .trim();
-
-          out.push({
-            id: String(id),
-            title,
-            url: full.split("?")[0]!,
-            dateText,
-            date: parseTrDate(dateText),
-            location,
-          });
-        },
-      );
-
-      if (out.length === 0) {
-        $('a[href*="/ilan/"]').each((_, el) => {
-          const href = $(el).attr("href") || "";
-          if (!href.includes("is-ilanlari") && !href.includes("guvenlik")) {
-            if (!href.includes("/ilan/is-ilanlari")) return;
-          }
-          const full = href.startsWith("http")
-            ? href
-            : `https://www.sahibinden.com${href}`;
-          const idMatch = full.match(/-(\d+)(?:\/|$)/);
-          const id = idMatch?.[1];
-          if (!id || seen.has(id)) return;
-          seen.add(id);
-          out.push({
-            id,
-            title: $(el).text().replace(/\s+/g, " ").trim() || `İlan ${id}`,
-            url: full.split("?")[0]!,
-            dateText: "",
-            date: new Date(),
-            location: "",
-          });
-        });
-      }
-
-      if (out.length === 0 && page === 1) break;
-      if (out.length === 0) break;
-    }
-
-    return out;
-  }
-
-  private async fetchDetail(card: ListingCard): Promise<{
-    title: string;
-    body: string;
-    phone: string | null;
-    seller: string;
-    location: string;
-    date: Date | null;
-    url: string;
-  } | null> {
-    try {
-      const html = await this.fetchHtml(card.url, DEFAULT_URL);
-      const $ = cheerio.load(html);
-      const title =
-        $("h1").first().text().replace(/\s+/g, " ").trim() || card.title;
-
-      const infoLines: string[] = [];
-      $(".classifiedInfoList li, ul.classifiedInfoList li").each((_, el) => {
-        const t = $(el).text().replace(/\s+/g, " ").trim();
-        if (t) infoLines.push(t);
-      });
-
-      const desc =
-        $("#classifiedDescription, .classifiedDescription, .uiBox.container")
-          .first()
-          .text()
-          .replace(/\s+/g, " ")
-          .trim() ||
-        $("[itemprop=description]").text().replace(/\s+/g, " ").trim();
-
-      const seller =
-        $(".username-info-area h5, .user-info h5, .storeInfo h3")
-          .first()
-          .text()
-          .replace(/\s+/g, " ")
-          .trim() || "Sahibinden";
-
-      let phone =
-        $(".pretty-phone-part, #phoneInfo span, .userContactInfo .phone")
-          .first()
-          .text()
-          .replace(/\s+/g, " ")
-          .trim() || null;
-      if (!phone) phone = extractPhone(html);
-      if (!phone) phone = extractPhone(desc);
-
-      const dateFromInfo =
-        infoLines.find((l) => /ilan tarihi/i.test(l)) || card.dateText;
-      const date =
-        parseTrDate(dateFromInfo.replace(/ilan tarihi[:\s]*/i, "")) ||
-        card.date;
-
-      const location =
-        infoLines
-          .find((l) => /il\s*\/\s*ilçe|il \/ ilce/i.test(l))
-          ?.replace(/.*?:\s*/i, "") || card.location;
-
-      const body = [infoLines.join("\n"), "", desc].filter(Boolean).join("\n");
-
-      return {
-        title,
-        body,
-        phone,
-        seller,
-        location,
-        date,
-        url: card.url,
-      };
-    } catch (err) {
-      logger.warn({ err, url: card.url }, "Sahibinden detail fetch failed");
-      return null;
     }
   }
 }

@@ -52,3 +52,7 @@ whatsapp-auth/
 whatsapp-auth-dev/
 artifacts/whatsapp-auth/
 artifacts/whatsapp-auth-dev/
+scripts/.sahibinden-chrome-profile/
+scripts/sahibinden-bridge.log
+scripts/run-sahibinden-bridge.cmd
+

@@ -29,8 +29,7 @@ type Status = {
   total: number;
   lastAdded: number;
   lastError: string | null;
-  hasProxy?: boolean;
-  hasCookies?: boolean;
+  mode?: string;
 };
 
 type Msg = {
@@ -125,7 +124,7 @@ export function SahibindenTab() {
         body: JSON.stringify({ deep }),
       });
       const data = await res.json();
-      if (String(data.message || '').includes('hata') || String(data.message || '').includes('engelledi')) {
+      if (String(data.message || '').includes('hata') || String(data.message || '').includes('giriş')) {
         toast.error(data.message || 'Tarama başarısız');
       } else {
         toast.success(data.message || 'Tarama bitti');
@@ -199,18 +198,11 @@ export function SahibindenTab() {
 
       <Card className="p-4 border-border/50 space-y-3 shrink-0">
         <p className="text-sm text-muted-foreground">
-          Sahibinden Railway (sunucu) IP&apos;lerini bot diye engeller. Siteye insan gibi
-          (Chrome header + cookie + anasayfa ısınma) gidilir; yine 403 olursa ev IP&apos;si
-          veya residential proxy gerekir.
+          Railway üzerinde headless <strong>Chromium</strong> ile doğrudan ilan
+          sayfasına girer (giriş yapılmaz). Her 30 dk otomatik tarar. Cloudflare
+          kutusu otomatik tıklanır.
         </p>
-        <div className="flex flex-wrap gap-2 text-xs">
-          <Badge variant={status?.hasProxy ? 'default' : 'secondary'}>
-            Proxy: {status?.hasProxy ? 'açık' : 'yok'}
-          </Badge>
-          <Badge variant={status?.hasCookies ? 'default' : 'secondary'}>
-            Cookie: {status?.hasCookies ? 'var' : 'yok'}
-          </Badge>
-        </div>
+        <Badge variant="secondary">Mod: {status?.mode || 'chromium'}</Badge>
         <div className="flex flex-col md:flex-row gap-2">
           <Input
             value={url}
@@ -226,28 +218,12 @@ export function SahibindenTab() {
           <Textarea
             value={cookies}
             onChange={(e) => setCookies(e.target.value)}
-            placeholder="Chrome cookie (isteğe bağlı): F12 → Application → Cookies → sahibinden.com satırlarını name=value; name2=value2 olarak yapıştır"
-            className="min-h-[72px] text-xs font-mono"
+            placeholder="İsteğe bağlı: giriş duvarı gelirse Chrome cookie yapıştır (F12 → Application → Cookies)"
+            className="min-h-[64px] text-xs font-mono"
           />
           <Button variant="outline" size="sm" onClick={saveCookies}>
             Cookie Kaydet
           </Button>
-        </div>
-        <div className="rounded-md border border-border/60 bg-muted/30 p-3 text-xs text-muted-foreground space-y-1">
-          <p className="font-medium text-foreground">403 / bağlanmıyor — ne yapmalısın?</p>
-          <p>
-            Sahibinden, Railway ve Node isteklerini bot diye keser. En sağlam yol:
-            kendi bilgisayarındaki Chrome ile köprü:
-          </p>
-          <p className="font-mono text-foreground break-all">
-            $env:SAHIBINDEN_API=&quot;https://wphot-production-cf99.up.railway.app&quot;
-            <br />
-            pnpm sahibinden:bridge
-          </p>
-          <p>
-            Alternatif: Railway Variables&apos;a Türk residential proxy:{' '}
-            <code className="text-foreground">SAHIBINDEN_PROXY</code>
-          </p>
         </div>
         <div className="flex flex-wrap gap-2">
           <Button onClick={() => scan(true)} disabled={scanning} className="gap-2">
@@ -268,8 +244,8 @@ export function SahibindenTab() {
               <AlertDialogHeader>
                 <AlertDialogTitle>Sahibinden havuzunu temizle?</AlertDialogTitle>
                 <AlertDialogDescription>
-                  Sadece Sahibinden ilanları silinir. Sonra Yeniden Tara ile max 15 gün
-                  geri çekilir; dinleme yeni ilanları almaya devam eder.
+                  Sadece Sahibinden ilanları silinir; ardından Chromium ile max 15
+                  gün yeniden taranır.
                 </AlertDialogDescription>
               </AlertDialogHeader>
               <AlertDialogFooter>
@@ -290,7 +266,7 @@ export function SahibindenTab() {
             <div className="text-center text-muted-foreground py-16">
               <p>Henüz Sahibinden ilanı yok.</p>
               <p className="text-sm mt-2 opacity-70">
-                Proxy / cookie / yerel köprü ile tarama yapın.
+                Deploy sonrası otomatik dinleme başlar; veya Yeniden Tara.
               </p>
             </div>
           ) : (

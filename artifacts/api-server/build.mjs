@@ -101,6 +101,8 @@ async function buildAll() {
       "zeromq",
       "zeromq-prebuilt",
       "playwright",
+      "playwright-core",
+      "patchright",
       "puppeteer",
       "puppeteer-core",
       "electron",

@@ -1,0 +1,6 @@
+{
+  "api": "https://wphot-production-cf99.up.railway.app",
+  "url": "https://www.sahibinden.com/koruma-guvenlik-guvenlik-gorevlisi-is-ilanlari",
+  "deep": false,
+  "pollMinutes": 30
+}

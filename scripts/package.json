@@ -6,10 +6,12 @@
   "scripts": {
     "hello": "tsx ./src/hello.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "sahibinden:bridge": "node ./sahibinden-bridge.mjs"
+    "sahibinden:bridge": "node ./sahibinden-bridge.mjs",
+    "sahibinden:install": "powershell -ExecutionPolicy Bypass -File ./install-sahibinden-autostart.ps1"
   },
   "dependencies": {
     "cheerio": "^1.1.2",
+    "patchright": "^1.61.1",
     "playwright": "^1.61.1"
   },
   "devDependencies": {

@@ -1,11 +1,11 @@
 [build]
 builder = "NIXPACKS"
-# Deploy trigger: 2026-07-16
-buildCommand = "pnpm run build:prod"
+# Deploy trigger: 2026-07-17 chromium
+buildCommand = "pnpm run build:prod && pnpm --filter @workspace/api-server exec playwright install --with-deps chromium"
 
 [deploy]
 startCommand = "pnpm run start:prod"
 healthcheckPath = "/api/healthz"
-healthcheckTimeout = 180
+healthcheckTimeout = 300
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 5
