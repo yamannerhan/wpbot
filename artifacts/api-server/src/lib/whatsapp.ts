@@ -1505,10 +1505,20 @@ class WhatsAppService {
       content: string;
       sender: string;
       timestamp: Date;
+      fetchedAt: Date;
     }> = [];
 
     let skippedEmpty = 0;
     let skippedNoTs = 0;
+
+    // Eski placeholder satırları temizle — yeniden OCR ile dolacak
+    try {
+      await db
+        .delete(whatsappMessagesTable)
+        .where(like(whatsappMessagesTable.content, "%yazı ayıklanıyor%"));
+    } catch {
+      /* ignore */
+    }
 
     for (const msg of messages) {
       if (!msg.key?.remoteJid || !msg.key?.id) continue;
@@ -1527,7 +1537,7 @@ class WhatsAppService {
           : null;
       if (!matchedJid) continue;
 
-      // Media: store immediately as "Medya", OCR fills text underneath async
+      // Media: OCR first, then pool gets final "Medya" + text (no placeholder)
       const caption = extractText(msg)?.trim() || "";
       const imageNode = getImageMessageNode(msg);
       const isImageDoc = isImageDocument(msg);
@@ -1540,14 +1550,20 @@ class WhatsAppService {
       );
 
       let text = caption;
-      let needsOcr = false;
 
       if (hasImage) {
-        // Don't block the pool on OCR — insert first, enrich after
-        text = caption
-          ? `Medya\n\n${caption}`
-          : "Medya\n\n(yazı ayıklanıyor...)";
-        needsOcr = true;
+        // Wait for OCR so pool never shows "yazı ayıklanıyor"
+        const ocrText = await this.ocrImageMessage(msg);
+        const body = ocrText || caption || "(görselden yazı okunamadı)";
+        text = `Medya\n\n${body}`;
+        logger.info(
+          {
+            messageId: msg.key.id,
+            ocrChars: ocrText.length,
+            live: !isHistory,
+          },
+          "Media OCR ready — storing under Medya",
+        );
       } else if (hasOtherMedia && !text) {
         text = "Medya";
       } else if (!text) {
@@ -1572,6 +1588,8 @@ class WhatsAppService {
       if (isHistory && tsSeconds < fifteenDaysAgoSec) continue;
 
       const msgDate = new Date(tsSeconds * 1000);
+      // Pool "newness" — OCR/store anı; çeken bot en üstte yeni görür
+      const fetchedAt = new Date();
 
       const participant =
         (msg as { participant?: string }).participant ??
@@ -1591,14 +1609,8 @@ class WhatsAppService {
         content,
         sender: String(sender),
         timestamp: msgDate,
+        fetchedAt,
       });
-
-      if (needsOcr) {
-        // Background OCR — update pool row when text is ready
-        void this.enrichMediaWithOcr(msg, matchedJid, messageId, caption).catch(
-          (err) => logger.warn({ err, messageId }, "Background OCR failed"),
-        );
-      }
     }
 
     if (toInsert.length === 0) {
@@ -1612,21 +1624,39 @@ class WhatsAppService {
     }
 
     try {
-      // Dedupe only by WhatsApp messageId+groupId (DB unique) — keep every distinct msg
-      const uniqueRows = toInsert;
-      const dbExactDup = 0;
-
       await db
         .insert(whatsappMessagesTable)
-        .values(uniqueRows)
-        .onConflictDoNothing();
+        .values(toInsert)
+        .onConflictDoUpdate({
+          target: [
+            whatsappMessagesTable.messageId,
+            whatsappMessagesTable.groupId,
+          ],
+          set: {
+            content: sql`excluded.content`,
+            fetchedAt: sql`excluded.fetched_at`,
+            groupName: sql`excluded.group_name`,
+            sender: sql`excluded.sender`,
+          },
+        });
 
       await db
         .insert(whatsappMessagesArchiveTable)
-        .values(uniqueRows)
-        .onConflictDoNothing();
+        .values(toInsert)
+        .onConflictDoUpdate({
+          target: [
+            whatsappMessagesArchiveTable.messageId,
+            whatsappMessagesArchiveTable.groupId,
+          ],
+          set: {
+            content: sql`excluded.content`,
+            fetchedAt: sql`excluded.fetched_at`,
+            groupName: sql`excluded.group_name`,
+            sender: sql`excluded.sender`,
+          },
+        });
 
-      this.scanStoredListings += uniqueRows.length;
+      this.scanStoredListings += toInsert.length;
       await this.persistCursorsToDb();
 
       if (!isHistory) {
@@ -1636,10 +1666,9 @@ class WhatsAppService {
 
       logger.info(
         {
-          stored: uniqueRows.length,
+          stored: toInsert.length,
           skippedEmpty,
           skippedNoTs,
-          dbExactDup,
           isHistory,
         },
         "Messages stored",
@@ -1647,39 +1676,6 @@ class WhatsAppService {
     } catch (err) {
       logger.error({ err }, "Failed to store messages");
     }
-  }
-
-  private async enrichMediaWithOcr(
-    msg: proto.IWebMessageInfo,
-    groupId: string,
-    messageId: string,
-    caption: string,
-  ): Promise<void> {
-    const ocrText = await this.ocrImageMessage(msg);
-    const body = ocrText || caption || "(görselden yazı okunamadı)";
-    const content = normalizeListingContent(`Medya\n\n${body}`);
-    await db
-      .update(whatsappMessagesTable)
-      .set({ content })
-      .where(
-        and(
-          eq(whatsappMessagesTable.messageId, messageId),
-          eq(whatsappMessagesTable.groupId, groupId),
-        ),
-      );
-    await db
-      .update(whatsappMessagesArchiveTable)
-      .set({ content })
-      .where(
-        and(
-          eq(whatsappMessagesArchiveTable.messageId, messageId),
-          eq(whatsappMessagesArchiveTable.groupId, groupId),
-        ),
-      );
-    logger.info(
-      { messageId, ocrChars: ocrText.length },
-      "Media OCR written under Medya",
-    );
   }
 
   private async ocrImageMessage(

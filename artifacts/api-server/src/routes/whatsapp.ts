@@ -154,7 +154,7 @@ router.get("/whatsapp/messages", async (req, res): Promise<void> => {
       .select()
       .from(whatsappMessagesTable)
       .where(whereClause)
-      .orderBy(desc(whatsappMessagesTable.timestamp))
+      .orderBy(desc(whatsappMessagesTable.fetchedAt))
       .limit(limit)
       .offset(offset),
     db

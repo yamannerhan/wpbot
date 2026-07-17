@@ -274,8 +274,9 @@ export function MessagesTab() {
             <p className="text-sm mt-2 opacity-70 max-w-md text-center">
               Seçili grup/kanallardaki tüm mesajlar alınır (max 15 gün geri,
               gidebildiği kadar). Bağlantı kopunca kaldığı mesajdan devam eder.
-              Görselli mesajlar &quot;Medya&quot; olarak kaydedilir; altinda
-              resimden OCR ile ayıklanan ilan yazısı durur.
+              Görselli mesajlar önce OCR ile okunur, sonra &quot;Medya&quot; + yazı
+              olarak havuza düşer (en üstte). Yeni gelen medya da otomatik
+              ayıklanır.
             </p>
             {debouncedSearch && (
               <p className="text-sm mt-2 opacity-70">
