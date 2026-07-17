@@ -3,6 +3,7 @@ import makeWASocket, {
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
   Browsers,
+  downloadMediaMessage,
   getBinaryNodeChild,
   getBinaryNodeChildren,
   S_WHATSAPP_NET,
@@ -26,6 +27,7 @@ import {
 import { eq, desc, sql, gte } from "drizzle-orm";
 import pino from "pino";
 import { shouldStorePoolMessage } from "./listing-filter.js";
+import { extractTextFromImage } from "./ocr.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const AUTH_SUFFIX = process.env.NODE_ENV === "development" ? "-dev" : "";
@@ -1519,23 +1521,45 @@ class WhatsAppService {
           : null;
       if (!matchedJid) continue;
 
-      // ALL text (+ media placeholder) from selected groups/channels
+      // ALL text (+ media + OCR from images) from selected groups/channels
       let text = extractText(msg);
+      const imageNode = getImageMessageNode(msg);
+      const hasMedia =
+        Boolean(imageNode) ||
+        Boolean(
+          msg.message?.videoMessage ||
+            msg.message?.documentMessage ||
+            msg.message?.stickerMessage ||
+            msg.message?.audioMessage ||
+            msg.message?.ephemeralMessage ||
+            msg.message?.viewOnceMessage ||
+            msg.message?.viewOnceMessageV2,
+        );
+
+      if (!text && hasMedia) {
+        text = "[Medya mesajı]";
+      }
       if (!text) {
-        const m = msg.message;
-        if (
-          m?.imageMessage ||
-          m?.videoMessage ||
-          m?.documentMessage ||
-          m?.stickerMessage ||
-          m?.audioMessage
-        ) {
-          text = "[Medya mesajı]";
-        } else {
-          skippedEmpty++;
-          continue;
+        skippedEmpty++;
+        continue;
+      }
+
+      // Image ads: OCR text inside the picture and append under the media line
+      if (imageNode && this.sock) {
+        try {
+          const ocrText = await this.ocrImageMessage(msg);
+          if (ocrText) {
+            const caption = extractText(msg)?.trim() || "";
+            const head = caption || "[Medya mesajı — görsel]";
+            text = `${head}\n\n--- Görselden ayıklanan yazı ---\n${ocrText}`;
+          } else if (!extractText(msg)) {
+            text = "[Medya mesajı — görsel (yazı okunamadı)]";
+          }
+        } catch (err) {
+          logger.debug({ err }, "Image OCR skipped");
         }
       }
+
       const content = normalizeListingContent(text);
       if (!content || !shouldStorePoolMessage(content)) {
         skippedEmpty++;
@@ -1622,6 +1646,28 @@ class WhatsAppService {
     }
   }
 
+  private async ocrImageMessage(
+    msg: proto.IWebMessageInfo,
+  ): Promise<string> {
+    if (!this.sock) return "";
+    try {
+      const buffer = (await downloadMediaMessage(
+        msg as any,
+        "buffer",
+        {},
+        {
+          logger: baileysLogger,
+          reuploadRequest: this.sock.updateMediaMessage,
+        },
+      )) as Buffer;
+      if (!buffer?.length) return "";
+      return await extractTextFromImage(buffer);
+    } catch (err) {
+      logger.debug({ err }, "downloadMediaMessage for OCR failed");
+      return "";
+    }
+  }
+
   private async getGroupName(jid: string): Promise<string> {
     if (this.groupNameCache.has(jid)) {
       return this.groupNameCache.get(jid)!;
@@ -1691,6 +1737,25 @@ class WhatsAppService {
 /** Exact listing text only — tiny salary/phone/name differences stay as separate ads. */
 function normalizeListingContent(text: string): string {
   return text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
+}
+
+function getImageMessageNode(
+  msg: proto.IWebMessageInfo,
+): proto.Message.IImageMessage | null {
+  const m = msg.message;
+  if (!m) return null;
+  const inner =
+    m.ephemeralMessage?.message ||
+    m.viewOnceMessage?.message ||
+    m.viewOnceMessageV2?.message ||
+    m.viewOnceMessageV2Extension?.message ||
+    m.documentWithCaptionMessage?.message ||
+    m;
+  return (
+    (inner as typeof m)?.imageMessage ||
+    m.imageMessage ||
+    null
+  );
 }
 
 function extractText(msg: proto.IWebMessageInfo): string | null {
