@@ -56,3 +56,4 @@ scripts/.sahibinden-chrome-profile/
 scripts/sahibinden-bridge.log
 scripts/run-sahibinden-bridge.cmd
 
+scripts/sahibinden-watch.log
