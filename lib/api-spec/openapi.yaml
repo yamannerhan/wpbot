@@ -158,6 +158,13 @@ paths:
           schema:
             type: integer
             default: 0
+        - name: pool
+          in: query
+          description: text = normal mesajlar, media = Medya OCR havuzu, all = hepsi
+          schema:
+            type: string
+            enum: [text, media, all]
+            default: all
       responses:
         "200":
           description: Messages
@@ -320,6 +327,16 @@ components:
       required: [total, groups, listening, selectedGroupCount]
       properties:
         total:
+          type: integer
+        textTotal:
+          type: integer
+          description: Normal metin mesaj sayısı (Medya hariç)
+        mediaTotal:
+          type: integer
+          description: Medya OCR yazı sayısı
+        pending:
+          type: integer
+        published:
           type: integer
         selectedGroupCount:
           type: integer

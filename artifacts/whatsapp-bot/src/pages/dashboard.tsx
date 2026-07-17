@@ -43,6 +43,12 @@ export default function Dashboard() {
               Mesaj Havuzu
             </TabsTrigger>
             <TabsTrigger 
+              value="media" 
+              className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent px-2 sm:px-4 py-3 data-[state=active]:text-primary transition-all whitespace-nowrap"
+            >
+              Medya Havuzu
+            </TabsTrigger>
+            <TabsTrigger 
               value="sahibinden" 
               className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent px-2 sm:px-4 py-3 data-[state=active]:text-primary transition-all whitespace-nowrap"
             >
@@ -60,7 +66,11 @@ export default function Dashboard() {
             </TabsContent>
             
             <TabsContent value="messages" className="mt-0 outline-none h-full">
-              <MessagesTab />
+              <MessagesTab pool="text" />
+            </TabsContent>
+
+            <TabsContent value="media" className="mt-0 outline-none h-full">
+              <MessagesTab pool="media" />
             </TabsContent>
 
             <TabsContent value="sahibinden" className="mt-0 outline-none h-full">

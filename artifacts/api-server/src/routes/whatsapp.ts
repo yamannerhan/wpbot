@@ -135,9 +135,16 @@ router.get("/whatsapp/messages", async (req, res): Promise<void> => {
     return;
   }
 
-  const { groupId, search, limit = 100, offset = 0 } = params.data;
+  const { groupId, search, limit = 100, offset = 0, pool = "all" } = params.data;
 
   const conditions = [notSahibinden];
+
+  // Medya havuzu: içeriği "Medya" ile başlayanlar; mesaj havuzu: diğerleri
+  if (pool === "media") {
+    conditions.push(sql`${whatsappMessagesTable.content} ~* '^Medya(\\n|$)'`);
+  } else if (pool === "text") {
+    conditions.push(sql`${whatsappMessagesTable.content} !~* '^Medya(\\n|$)'`);
+  }
 
   if (groupId) {
     conditions.push(eq(whatsappMessagesTable.groupId, groupId));
@@ -230,12 +237,23 @@ router.delete("/whatsapp/messages", async (req, res): Promise<void> => {
 
 // GET /whatsapp/messages/stats
 router.get("/whatsapp/messages/stats", async (req, res): Promise<void> => {
-  const [totalResult, pendingResult, publishedResult, groupStats, selectedGroupIds] =
+  const mediaCond = sql`${whatsappMessagesTable.content} ~* '^Medya(\\n|$)'`;
+  const textCond = sql`${whatsappMessagesTable.content} !~* '^Medya(\\n|$)'`;
+
+  const [totalResult, textResult, mediaResult, pendingResult, publishedResult, groupStats, selectedGroupIds] =
     await Promise.all([
     db
       .select({ count: sql<number>`count(*)` })
       .from(whatsappMessagesTable)
       .where(notSahibinden),
+    db
+      .select({ count: sql<number>`count(*)` })
+      .from(whatsappMessagesTable)
+      .where(and(notSahibinden, textCond)),
+    db
+      .select({ count: sql<number>`count(*)` })
+      .from(whatsappMessagesTable)
+      .where(and(notSahibinden, mediaCond)),
     db
       .select({ count: sql<number>`count(*)` })
       .from(whatsappMessagesTable)
@@ -272,6 +290,8 @@ router.get("/whatsapp/messages/stats", async (req, res): Promise<void> => {
 
   res.json({
     total: Number(totalResult[0]?.count ?? 0),
+    textTotal: Number(textResult[0]?.count ?? 0),
+    mediaTotal: Number(mediaResult[0]?.count ?? 0),
     pending: Number(pendingResult[0]?.count ?? 0),
     published: Number(publishedResult[0]?.count ?? 0),
     selectedGroupCount: selectedGroupIds.length,

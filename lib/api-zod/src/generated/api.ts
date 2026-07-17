@@ -124,7 +124,8 @@ export const GetMessagesQueryParams = zod.object({
   "groupId": zod.coerce.string().optional(),
   "search": zod.coerce.string().optional(),
   "limit": zod.coerce.number().default(getMessagesQueryLimitDefault),
-  "offset": zod.coerce.number().default(getMessagesQueryOffsetDefault)
+  "offset": zod.coerce.number().default(getMessagesQueryOffsetDefault),
+  "pool": zod.enum(["text", "media", "all"]).default("all"),
 })
 
 export const GetMessagesResponse = zod.object({
@@ -155,6 +156,10 @@ export const ClearMessagesResponse = zod.object({
  */
 export const GetMessageStatsResponse = zod.object({
   "total": zod.number(),
+  "textTotal": zod.number().optional(),
+  "mediaTotal": zod.number().optional(),
+  "pending": zod.number().optional(),
+  "published": zod.number().optional(),
   "selectedGroupCount": zod.number(),
   "groups": zod.array(zod.object({
   "groupId": zod.string(),

@@ -30,6 +30,7 @@ import {
   History,
   Trash2,
   MessageSquare,
+  ImageIcon,
   Clock,
   Users,
   Hash,
@@ -37,6 +38,8 @@ import {
   ExternalLink,
 } from 'lucide-react';
 import { toast } from 'sonner';
+
+export type MessagePool = 'text' | 'media';
 
 /** WhatsApp send time — Istanbul clock (not fetch time) */
 function formatWrittenAt(isoString: string): string {
@@ -66,11 +69,17 @@ function buildWhatsAppGroupLink(groupId: string, messageId?: string): string {
   return `whatsapp://chat?jid=${jid}`;
 }
 
-export function MessagesTab() {
+type MessagesTabProps = {
+  /** text = Mesaj Havuzu, media = Medya Havuzu */
+  pool?: MessagePool;
+};
+
+export function MessagesTab({ pool = 'text' }: MessagesTabProps) {
   const queryClient = useQueryClient();
   const [searchTerm, setSearchTerm] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const searchTimeout = useRef<NodeJS.Timeout>(null);
+  const isMedia = pool === 'media';
 
   const handleSearchChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     setSearchTerm(e.target.value);
@@ -87,18 +96,30 @@ export function MessagesTab() {
     },
   });
 
+  const messageParams = {
+    search: debouncedSearch || undefined,
+    limit: 100,
+    pool,
+  };
+
   const {
     data: messagesPage,
     isLoading: messagesLoading,
     refetch: refetchMessages,
     isRefetching,
-  } = useGetMessages({
-    search: debouncedSearch || undefined,
-    limit: 100,
+  } = useGetMessages(messageParams, {
+    query: {
+      queryKey: getGetMessagesQueryKey(messageParams),
+      refetchInterval: 15000,
+    },
   });
 
   const fetchHistory = useFetchMessages();
   const clearPool = useClearMessages();
+
+  const poolCount = isMedia
+    ? (stats?.mediaTotal ?? 0)
+    : (stats?.textTotal ?? stats?.total ?? 0);
 
   const refreshLists = () => {
     queryClient.invalidateQueries({ queryKey: getGetMessageStatsQueryKey() });
@@ -125,13 +146,16 @@ export function MessagesTab() {
     clearPool.mutate(undefined, {
       onSuccess: (data) => {
         const msg =
-          (data as { message?: string })?.message || 'Havuz temizlendi.';
+          (data as { message?: string })?.message ||
+          'Mesaj ve medya havuzu temizlendi.';
         toast.success(msg);
         refreshLists();
       },
       onError: () => toast.error('Havuz temizlenemedi.'),
     });
   };
+
+  const EmptyIcon = isMedia ? ImageIcon : MessageSquare;
 
   return (
     <div className="space-y-6 flex flex-col h-[calc(100vh-160px)] animate-in fade-in duration-300">
@@ -141,12 +165,10 @@ export function MessagesTab() {
           <div className="flex items-center gap-2 mb-2">
             <Hash className="w-4 h-4 text-muted-foreground" />
             <p className="text-xs text-muted-foreground uppercase font-semibold tracking-wider">
-              Toplam Mesaj
+              {isMedia ? 'Medya Yazısı' : 'Toplam Mesaj'}
             </p>
           </div>
-          <p className="text-3xl font-bold text-primary font-mono">
-            {stats?.total || 0}
-          </p>
+          <p className="text-3xl font-bold text-primary font-mono">{poolCount}</p>
         </Card>
 
         <Card className="bg-card/80 backdrop-blur border-border/50 p-4 shadow-sm flex flex-col justify-center relative overflow-hidden group">
@@ -197,7 +219,11 @@ export function MessagesTab() {
         <div className="relative w-full md:w-[400px]">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
           <Input
-            placeholder="Mesaj içeriği, gönderen veya grup ara..."
+            placeholder={
+              isMedia
+                ? 'Medya yazısı, gönderen veya grup ara...'
+                : 'Mesaj içeriği, gönderen veya grup ara...'
+            }
             value={searchTerm}
             onChange={handleSearchChange}
             className="pl-9 bg-background border-border/50 focus-visible:ring-primary/50"
@@ -243,8 +269,8 @@ export function MessagesTab() {
               <AlertDialogHeader>
                 <AlertDialogTitle className="text-xl">Havuzu temizle?</AlertDialogTitle>
                 <AlertDialogDescription className="text-muted-foreground text-base">
-                  Havuzdaki tüm ilanlar silinir. Tarama yapılmaz — yeniden çekmek için ayrı
-                  &quot;Yeniden Tara (15 gün)&quot; butonunu kullan.
+                  Mesaj havuzu ve medya havuzu birlikte silinir. Tarama yapılmaz —
+                  yeniden çekmek için &quot;Yeniden Tara (15 gün)&quot; butonunu kullan.
                 </AlertDialogDescription>
               </AlertDialogHeader>
               <AlertDialogFooter className="mt-4">
@@ -265,18 +291,22 @@ export function MessagesTab() {
         {messagesLoading ? (
           <div className="flex-1 flex flex-col items-center justify-center space-y-4">
             <Loader2 className="w-10 h-10 animate-spin text-primary" />
-            <p className="text-muted-foreground animate-pulse">Mesajlar yükleniyor...</p>
+            <p className="text-muted-foreground animate-pulse">
+              {isMedia ? 'Medya yazıları yükleniyor...' : 'Mesajlar yükleniyor...'}
+            </p>
           </div>
         ) : !messagesPage?.messages?.length ? (
           <div className="flex-1 flex flex-col items-center justify-center text-muted-foreground">
-            <MessageSquare className="w-16 h-16 opacity-10 mb-6" />
-            <p className="text-lg">Havuzda henüz mesaj bulunmuyor.</p>
+            <EmptyIcon className="w-16 h-16 opacity-10 mb-6" />
+            <p className="text-lg">
+              {isMedia
+                ? 'Medya havuzunda henüz yazı yok.'
+                : 'Mesaj havuzunda henüz kayıt yok.'}
+            </p>
             <p className="text-sm mt-2 opacity-70 max-w-md text-center">
-              Seçili grup/kanallardaki tüm mesajlar alınır (max 15 gün geri,
-              gidebildiği kadar). Bağlantı kopunca kaldığı mesajdan devam eder.
-              Görselli mesajlar önce OCR ile okunur, sonra &quot;Medya&quot; + yazı
-              olarak havuza düşer (en üstte). Yeni gelen medya da otomatik
-              ayıklanır.
+              {isMedia
+                ? 'Görsel/video mesajlardan OCR ile ayıklanan yazılar buraya düşer. Yeniden Tara hem mesaj hem medya havuzunu doldurur.'
+                : 'Sadece metin mesajlar buraya düşer. Görsellerin OCR yazıları Medya Havuzu sekmesinde. Temizle / Yeniden Tara her iki havuzu da etkiler.'}
             </p>
             {debouncedSearch && (
               <p className="text-sm mt-2 opacity-70">
@@ -296,6 +326,14 @@ export function MessagesTab() {
                 >
                   <div className="flex flex-col sm:flex-row sm:justify-between sm:items-start gap-2 sm:gap-4">
                     <div className="flex items-center gap-3 overflow-hidden min-w-0">
+                      {isMedia && (
+                        <Badge
+                          variant="outline"
+                          className="bg-amber-500/10 text-amber-700 border-amber-500/20 shrink-0 font-medium px-2 py-0.5 rounded-md"
+                        >
+                          Medya
+                        </Badge>
+                      )}
                       {isChannel && (
                         <Badge
                           variant="outline"
@@ -337,7 +375,7 @@ export function MessagesTab() {
                       target="_blank"
                       rel="noopener noreferrer"
                       className="inline-flex items-center gap-1.5 text-xs font-medium text-primary hover:underline"
-                      title={isChannel ? "WhatsApp kanalını aç" : "WhatsApp grubunu / mesajı aç"}
+                      title={isChannel ? 'WhatsApp kanalını aç' : 'WhatsApp grubunu / mesajı aç'}
                     >
                       <ExternalLink className="w-3.5 h-3.5" />
                       WhatsApp&apos;ta aç

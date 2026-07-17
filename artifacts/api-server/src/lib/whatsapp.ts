@@ -792,7 +792,7 @@ class WhatsAppService {
       deleted,
       message:
         deleted > 0
-          ? `Havuz temizlendi (${deleted} ilan arşive alındı). "Yeniden Tara" ile son 15 güne (veya gidebildiği kadar) geri çekilir.`
+          ? `Havuz temizlendi (${deleted} ilan arşive alındı — mesaj + medya). "Yeniden Tara" ile son 15 güne geri çekilir.`
           : "Havuz zaten boş. Yeniden Tara ile 15 güne kadar geri tarayın.",
     };
   }

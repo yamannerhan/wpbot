@@ -9,6 +9,10 @@ import type { MessageStatsGroupsItem } from './messageStatsGroupsItem';
 
 export interface MessageStats {
   total: number;
+  textTotal?: number;
+  mediaTotal?: number;
+  pending?: number;
+  published?: number;
   /** Number of groups selected for listening */
   selectedGroupCount: number;
   groups: MessageStatsGroupsItem[];

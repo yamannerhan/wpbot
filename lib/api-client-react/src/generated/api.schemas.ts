@@ -98,6 +98,12 @@ export type MessageStatsGroupsItem = {
 
 export interface MessageStats {
   total: number;
+  /** Normal metin mesajları (Medya hariç) */
+  textTotal?: number;
+  /** Medya OCR yazıları */
+  mediaTotal?: number;
+  pending?: number;
+  published?: number;
   /** Number of groups selected for listening */
   selectedGroupCount: number;
   groups: MessageStatsGroupsItem[];
@@ -113,5 +119,7 @@ groupId?: string;
 search?: string;
 limit?: number;
 offset?: number;
+/** text = normal, media = Medya OCR, all = hepsi */
+pool?: 'text' | 'media' | 'all';
 };
 
