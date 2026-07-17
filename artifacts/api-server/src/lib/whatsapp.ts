@@ -23,9 +23,9 @@ import {
   whatsappChatCursorsTable,
   whatsappConfigTable,
 } from "@workspace/db";
-import { eq, desc, inArray, sql, gte } from "drizzle-orm";
+import { eq, desc, sql, gte } from "drizzle-orm";
 import pino from "pino";
-import { isPrivateSecurityJobListing } from "./listing-filter.js";
+import { shouldStorePoolMessage } from "./listing-filter.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const AUTH_SUFFIX = process.env.NODE_ENV === "development" ? "-dev" : "";
@@ -40,10 +40,10 @@ const LISTEN_INTERVAL_MS = 5 * 60 * 1000;
 const HISTORY_LOOKBACK_MS = 15 * 24 * 60 * 60 * 1000;
 /** WhatsApp on-demand history max is ~50 per request. */
 const HISTORY_PAGE_SIZE = 50;
-const HISTORY_MAX_ROUNDS_DEEP = 80;
-const HISTORY_MAX_ROUNDS_RESUME = 10;
+const HISTORY_MAX_ROUNDS_DEEP = 200;
+const HISTORY_MAX_ROUNDS_RESUME = 40;
 const HISTORY_BATCH_WAIT_MS = 12_000;
-const HISTORY_CHAT_GAP_MS = 1200;
+const HISTORY_CHAT_GAP_MS = 800;
 
 /**
  * Real WhatsApp send time (unix seconds). Handles number / bigint / Long.
@@ -151,6 +151,8 @@ class WhatsAppService {
   private forcingHistoryResync = false;
   /** Set by Havuzu Temizle — next Yeniden Tara does deep 15-day pull. */
   private deepRescanPending = false;
+  /** After disconnect: reconnect must resume scan from saved cursors immediately. */
+  private resumeAfterReconnect = false;
 
   getStatus(): WAStatus {
     return { ...this.status };
@@ -334,6 +336,18 @@ class WhatsAppService {
 
           const wasConnected = this.status.state === "connected";
 
+          // Save exact cursors so we resume the same message/time after reconnect
+          try {
+            await this.persistCursorsToDb();
+            logger.info("Cursors persisted before disconnect");
+          } catch (err) {
+            logger.warn({ err }, "Failed to persist cursors on disconnect");
+          }
+
+          if (wasConnected && !isLoggedOut) {
+            this.resumeAfterReconnect = true;
+          }
+
           this.status = {
             connected: false,
             state: "disconnected",
@@ -376,11 +390,25 @@ class WhatsAppService {
           logger.info({ phone: this.status.phone }, "WhatsApp connected");
           this.startListening();
 
+          // Resume from last message cursor ASAP (unless user asked deep clear+scan)
+          const wantDeep = this.deepRescanPending;
+          const wantResume = this.resumeAfterReconnect || !wantDeep;
+          this.resumeAfterReconnect = false;
+
           setTimeout(() => {
-            this.fetchHistory({ mode: "deep" }).catch((err) =>
-              logger.error({ err }, "Auto history fetch failed"),
+            if (this.forcingHistoryResync) {
+              logger.info("Skip post-connect scan — deep fetch already running");
+              return;
+            }
+            const mode = wantDeep ? "deep" : "resume";
+            logger.info(
+              { mode, wantDeep, wantResume },
+              "Post-connect scan starting from saved cursors",
             );
-          }, 5000);
+            this.fetchHistory({ mode }).catch((err) =>
+              logger.error({ err }, "Post-connect history fetch failed"),
+            );
+          }, wantDeep ? 4000 : 1500);
         }
       });
 
@@ -789,7 +817,7 @@ class WhatsAppService {
 
     for (const row of rows) {
       const content = normalizeListingContent(row.content);
-      if (!content || !isPrivateSecurityJobListing(content)) continue;
+      if (!content || !shouldStorePoolMessage(content)) continue;
       if (existingContent.has(content) || batchContents.has(content)) continue;
       batchContents.add(content);
       toRestore.push({
@@ -1104,17 +1132,17 @@ class WhatsAppService {
       return {
         triggered,
         storedHint:
-          `${selectedGroupIds.length} kaynak · ${added} ilan · ${reachHint}. ` +
-          `${stillLooking} kaynakta daha eski mesaj için 5 dk'da kaldığı yerden devam. Dinleme açık.`,
+          `${selectedGroupIds.length} kaynak · ${added} mesaj · ${reachHint}. ` +
+          `${stillLooking} kaynakta daha eski için 5 dk'da / kopunca kaldığı yerden devam. Dinleme açık.`,
       };
     }
 
     return {
       triggered,
       storedHint:
-        `${selectedGroupIds.length} kaynak · ${added} ilan · ${reachHint}` +
+        `${selectedGroupIds.length} kaynak · ${added} mesaj · ${reachHint}` +
         (restored ? ` (arşiv ${restored})` : "") +
-        `. Gidebildiği kadar tamam — dinleme modu (5 dk top-up).`,
+        `. Gidebildiği kadar tamam — dinleme (kopunca cursor kaydı, bağlanınca devam).`,
     };
   }
 
@@ -1263,6 +1291,9 @@ class WhatsAppService {
       }
 
       beforeServerId = pageOldestServer;
+      if (round % 5 === 4) {
+        await this.persistCursorsToDb();
+      }
       await new Promise((r) => setTimeout(r, 500));
     }
 
@@ -1468,10 +1499,7 @@ class WhatsAppService {
       timestamp: Date;
     }> = [];
 
-    // Skip only exact same listing text within this batch
-    const batchContents = new Set<string>();
-    let skippedNotListing = 0;
-    let skippedExactDup = 0;
+    let skippedEmpty = 0;
     let skippedNoTs = 0;
 
     for (const msg of messages) {
@@ -1491,25 +1519,30 @@ class WhatsAppService {
           : null;
       if (!matchedJid) continue;
 
-      const text = extractText(msg);
-      if (!text) continue;
+      // ALL text (+ media placeholder) from selected groups/channels
+      let text = extractText(msg);
+      if (!text) {
+        const m = msg.message;
+        if (
+          m?.imageMessage ||
+          m?.videoMessage ||
+          m?.documentMessage ||
+          m?.stickerMessage ||
+          m?.audioMessage
+        ) {
+          text = "[Medya mesajı]";
+        } else {
+          skippedEmpty++;
+          continue;
+        }
+      }
       const content = normalizeListingContent(text);
-      if (!content) continue;
+      if (!content || !shouldStorePoolMessage(content)) {
+        skippedEmpty++;
+        continue;
+      }
 
       this.scanSeenMessages++;
-
-      // Only skip tiny greetings — keep everything else from selected sources
-      if (!isPrivateSecurityJobListing(content)) {
-        skippedNotListing++;
-        continue;
-      }
-
-      // Exact same content only → duplicate (pool-wide / batch)
-      if (batchContents.has(content)) {
-        skippedExactDup++;
-        continue;
-      }
-      batchContents.add(content);
 
       // REAL WhatsApp send time — never use fetch/now for history
       const tsSeconds = extractMsgUnixSeconds(msg);
@@ -1542,42 +1575,19 @@ class WhatsAppService {
     }
 
     if (toInsert.length === 0) {
-      if (skippedNotListing > 0 || skippedExactDup > 0 || skippedNoTs > 0) {
+      if (skippedEmpty > 0 || skippedNoTs > 0) {
         logger.info(
-          { skippedNotListing, skippedExactDup, skippedNoTs, isHistory },
-          "No new listings to store after filters",
+          { skippedEmpty, skippedNoTs, isHistory },
+          "No new messages to store",
         );
       }
       return;
     }
 
     try {
-      // Drop rows whose content already exists in the pool (exact match only)
-      const contents = toInsert.map((r) => r.content);
-      const existing = await db
-        .select({ content: whatsappMessagesTable.content })
-        .from(whatsappMessagesTable)
-        .where(inArray(whatsappMessagesTable.content, contents));
-
-      const existingSet = new Set(
-        existing.map((e) => normalizeListingContent(e.content)),
-      );
-      const uniqueRows = toInsert.filter((r) => !existingSet.has(r.content));
-      const dbExactDup = toInsert.length - uniqueRows.length;
-
-      if (uniqueRows.length === 0) {
-        logger.info(
-          {
-            skipped: toInsert.length,
-            skippedNotListing,
-            skippedExactDup,
-            dbExactDup,
-            isHistory,
-          },
-          "All candidate listings were exact duplicates — skipped",
-        );
-        return;
-      }
+      // Dedupe only by WhatsApp messageId+groupId (DB unique) — keep every distinct msg
+      const uniqueRows = toInsert;
+      const dbExactDup = 0;
 
       await db
         .insert(whatsappMessagesTable)
@@ -1600,12 +1610,12 @@ class WhatsAppService {
       logger.info(
         {
           stored: uniqueRows.length,
-          skippedNotListing,
-          skippedExactDup,
+          skippedEmpty,
+          skippedNoTs,
           dbExactDup,
           isHistory,
         },
-        "Listings stored",
+        "Messages stored",
       );
     } catch (err) {
       logger.error({ err }, "Failed to store messages");

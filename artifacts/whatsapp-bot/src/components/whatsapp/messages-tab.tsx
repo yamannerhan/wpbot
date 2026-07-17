@@ -272,9 +272,9 @@ export function MessagesTab() {
             <MessageSquare className="w-16 h-16 opacity-10 mb-6" />
             <p className="text-lg">Havuzda henüz mesaj bulunmuyor.</p>
             <p className="text-sm mt-2 opacity-70 max-w-md text-center">
-              Grup + kanallar: max 15 gün geri (WhatsApp ne kadar verirse).
-              Bitmezse 5 dakikada kaldığı yerden devam eder. Tarih = gerçek
-              gönderim zamanı. Sadece birebir aynı metin atlanır.
+              Seçili grup/kanallardaki tüm mesajlar alınır (max 15 gün geri,
+              gidebildiği kadar). Bağlantı kopunca kaldığı mesajdan devam eder.
+              Sadece aynı WhatsApp mesaj ID tekrarlanmaz.
             </p>
             {debouncedSearch && (
               <p className="text-sm mt-2 opacity-70">
