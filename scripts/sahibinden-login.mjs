@@ -4,7 +4,7 @@
  * sonrası sunucuda Chromium otomatik ilan çeker (ekranında bir şey açılmaz).
  *
  * PowerShell:
- *   $env:SAHIBINDEN_API="https://wphot-production-cf99.up.railway.app"
+ *   $env:SAHIBINDEN_API="https://wpbot-production-cf99.up.railway.app"
  *   pnpm sahibinden:login
  *
  * veya çift tık: Sahibinden-Giris.cmd
@@ -33,7 +33,7 @@ function loadApi() {
   return (
     process.env.SAHIBINDEN_API?.replace(/\/$/, "") ||
     file.api?.replace(/\/$/, "") ||
-    "https://wphot-production-cf99.up.railway.app"
+    "https://wpbot-production-cf99.up.railway.app"
   );
 }
 

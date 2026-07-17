@@ -32,7 +32,7 @@ function loadConfig() {
     api:
       process.env.SAHIBINDEN_API?.replace(/\/$/, "") ||
       file.api?.replace(/\/$/, "") ||
-      "https://wphot-production-cf99.up.railway.app",
+      "https://wpbot-production-cf99.up.railway.app",
     url: process.env.SAHIBINDEN_URL || file.url || DEFAULT_URL,
     deep: process.env.SAHIBINDEN_DEEP === "1" || Boolean(file.deep),
   };
